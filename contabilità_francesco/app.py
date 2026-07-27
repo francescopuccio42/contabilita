@@ -3,10 +3,8 @@ import pandas as pd
 import os
 import shutil
 from datetime import datetime, date
-from typing import Any, Optional
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from postgrest import APIResponse  # type: ignore
 
 # Carica variabili d'ambiente dal file .env
 load_dotenv()
