@@ -1,81 +1,81 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import os
 import shutil
 from datetime import datetime, date
+from typing import Any, Optional
+from supabase import create_client, Client
+from dotenv import load_dotenv
+from postgrest import APIResponse  # type: ignore
+
+# Carica variabili d'ambiente dal file .env
+load_dotenv()
+
+# Configurazione Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("""
+        ⚠️ **Credenziali Supabase non trovate!**
+        
+        Assicurati di aver creato un file `.env` nella cartella del progetto con:
+        ```
+        SUPABASE_URL=https://xiqtlyotxufzivprxrzw.supabase.co
+        SUPABASE_KEY=la_tua_chiave_anon
+        ```
+        
+        Oppure esegui prima lo script SQL in `supabase_setup.sql` nel SQL Editor di Supabase.
+    """)
+    st.stop()
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Configurazione della pagina Streamlit
 st.set_page_config(
     page_title="Contabilità Francesco - WebApp",
-    page_icon="💰",
+    page_icon=":material/euro:",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # Definizione dei percorsi
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "contabilita.db")
 UPLOAD_DIR = os.path.join(BASE_DIR, "ricevute_uploads")
 
 # Creazione delle cartelle necessarie
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Funzioni di connessione e gestione Database SQLite
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+# Funzioni di connessione e gestione Database Supabase
 def init_db():
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        # Tabella transazioni
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS transazioni (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                data TEXT NOT NULL,
-                tipo TEXT NOT NULL,          -- 'Entrata' o 'Uscita'
-                voce TEXT NOT NULL,          -- Categoria/Voce di bilancio
-                importo REAL NOT NULL,
-                descrizione TEXT,
-                ricevuta_nome TEXT,          -- Nome file originale
-                ricevuta_percorso TEXT       -- Percorso locale del file salvato
-            )
-        """)
-        # Tabella categorie predefinite / personalizzate
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS categorie (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tipo TEXT NOT NULL,          -- 'Entrata' o 'Uscita'
-                nome TEXT NOT NULL UNIQUE
-            )
-        """)
-        
-        # Inserimento o aggiornamento delle categorie richieste dall'utente (con supporto incrementale per gli anni tasse f24)
-        anno_corrente = datetime.now().year
-        categorie_iniziali = [
-            ('Entrata', 'Fatturato / Vendite'),
-            ('Entrata', 'Prestazione Servizi'),
-            ('Entrata', 'Altro (Entrata)'),
-            ('Uscita', 'Affitto'),
-            ('Uscita', 'Stipendi'),
-            ('Uscita', 'Bollette luce gas appartamenti'),
-            ('Uscita', 'ufficio'),
-            ('Uscita', 'casa'),
-            ('Uscita', 'f24 : rateizzazione tasse 2025'),
-            ('Uscita', 'f24 : rateizzazione tasse 2026'),
-            ('Uscita', f'f24 : rateizzazione tasse {anno_corrente}'),
-            ('Uscita', f'f24 : rateizzazione tasse {anno_corrente + 1}'),
-            ('Uscita', 'Tasse di soggiorno'),
-            ('Uscita', 'Internet'),
-            ('Uscita', 'Booking - idealista - segreteria.it - immobiliare.it'),
-            ('Uscita', 'pulizia nolmar / tutto igiene / Verona lux / Albanese group'),
-            ('Uscita', 'Commercialista a tempora'),
-            ('Uscita', 'Altro (Uscita)')
-        ]
-        cursor.executemany("INSERT OR IGNORE INTO categorie (tipo, nome) VALUES (?, ?)", categorie_iniziali)
-        conn.commit()
+    """Verifica che le tabelle esistano su Supabase e inserisce le categorie iniziali."""
+    anno_corrente = datetime.now().year
+    categorie_iniziali = [
+        ('Entrata', 'Fatturato / Vendite'),
+        ('Entrata', 'Prestazione Servizi'),
+        ('Entrata', 'Altro (Entrata)'),
+        ('Uscita', 'Affitto'),
+        ('Uscita', 'Stipendi'),
+        ('Uscita', 'Bollette luce gas appartamenti'),
+        ('Uscita', 'ufficio'),
+        ('Uscita', 'casa'),
+        ('Uscita', 'f24 : rateizzazione tasse 2025'),
+        ('Uscita', 'f24 : rateizzazione tasse 2026'),
+        ('Uscita', f'f24 : rateizzazione tasse {anno_corrente}'),
+        ('Uscita', f'f24 : rateizzazione tasse {anno_corrente + 1}'),
+        ('Uscita', 'Tasse di soggiorno'),
+        ('Uscita', 'Internet'),
+        ('Uscita', 'Booking - idealista - segreteria.it - immobiliare.it'),
+        ('Uscita', 'pulizia nolmar / tutto igiene / Verona lux / Albanese group'),
+        ('Uscita', 'Commercialista a tempora'),
+        ('Uscita', 'Altro (Uscita)')
+    ]
+    
+    for tipo, nome in categorie_iniziali:
+        # Inserisci solo se non esiste già
+        existing = supabase.table("categorie").select("id").eq("nome", nome).execute()
+        if not existing.data:
+            supabase.table("categorie").insert({"tipo": tipo, "nome": nome}).execute()
 
 init_db()
 
@@ -94,34 +94,44 @@ def aggiungi_transazione(data, tipo, voce, importo, descrizione, ricevuta_file):
         
         with open(ricevuta_percorso, "wb") as f:
             shutil.copyfileobj(ricevuta_file, f)
-            
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO transazioni (data, tipo, voce, importo, descrizione, ricevuta_nome, ricevuta_percorso)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (data, tipo, voce, importo, descrizione, ricevuta_nome, ricevuta_percorso))
-        conn.commit()
+    
+    # Inserimento su Supabase
+    data_inserimento = {
+        "data": data,
+        "tipo": tipo,
+        "voce": voce,
+        "importo": importo,
+        "descrizione": descrizione if descrizione else None,
+        "ricevuta_nome": ricevuta_nome,
+        "ricevuta_percorso": ricevuta_percorso
+    }
+    
+    response = supabase.table("transazioni").insert(data_inserimento).execute()
+    
+    if hasattr(response, 'error') and response.error:
+        st.error(f"Errore durante l'inserimento: {response.error}")
+        return False
+    
+    return True
 
 def ottieni_transazioni(data_inizio=None, data_fine=None):
-    query = "SELECT * FROM transazioni"
-    parametri = []
+    query = supabase.table("transazioni").select("*")
     
     if data_inizio and data_fine:
-        query += " WHERE data BETWEEN ? AND ?"
-        parametri.extend([data_inizio, data_fine])
+        query = query.gte("data", data_inizio).lte("data", data_fine)
     elif data_inizio:
-        query += " WHERE data >= ?"
-        parametri.append(data_inizio)
+        query = query.gte("data", data_inizio)
     elif data_fine:
-        query += " WHERE data <= ?"
-        parametri.append(data_fine)
-        
-    query += " ORDER BY data DESC, id DESC"
+        query = query.lte("data", data_fine)
     
-    with get_connection() as conn:
-        df = pd.read_sql_query(query, conn, params=parametri)
-    return df
+    query = query.order("data", desc=True).order("id", desc=True)
+    response = query.execute()
+    
+    if response.data:
+        df = pd.DataFrame(response.data)
+        return df
+    else:
+        return pd.DataFrame()
 
 def elimina_transazione(id_transazione, percorso_ricevuta):
     if percorso_ricevuta and os.path.exists(percorso_ricevuta):
@@ -129,33 +139,41 @@ def elimina_transazione(id_transazione, percorso_ricevuta):
             os.remove(percorso_ricevuta)
         except Exception as e:
             st.error(f"Errore nell'eliminazione del file della ricevuta: {e}")
-            
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM transazioni WHERE id = ?", (id_transazione,))
-        conn.commit()
+    
+    # Eliminazione su Supabase
+    response = supabase.table("transazioni").delete().eq("id", id_transazione).execute()
+    
+    if hasattr(response, 'error') and response.error:
+        st.error(f"Errore durante l'eliminazione: {response.error}")
 
 def ottieni_categorie(tipo=None):
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        if tipo:
-            cursor.execute("SELECT nome FROM categorie WHERE tipo = ? ORDER BY nome ASC", (tipo,))
-        else:
-            cursor.execute("SELECT nome FROM categorie ORDER BY nome ASC")
-        return [row['nome'] for row in cursor.fetchall()]
+    query = supabase.table("categorie").select("nome")
+    
+    if tipo:
+        query = query.eq("tipo", tipo)
+    
+    query = query.order("nome")
+    response = query.execute()
+    
+    if response.data:
+        return [row['nome'] for row in response.data]
+    return []
 
 def aggiungi_categoria(tipo, nome):
     nome = nome.strip()
     if not nome:
         return False, "Il nome della categoria non può essere vuoto"
+    
     try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO categorie (tipo, nome) VALUES (?, ?)", (tipo, nome))
-            conn.commit()
+        # Controlla se esiste già
+        existing = supabase.table("categorie").select("id").eq("nome", nome).execute()
+        if existing.data:
+            return False, "Questa categoria esiste già."
+        
+        supabase.table("categorie").insert({"tipo": tipo, "nome": nome}).execute()
         return True, f"Categoria '{nome}' aggiunta con successo!"
-    except sqlite3.IntegrityError:
-        return False, "Questa categoria esiste già."
+    except Exception as e:
+        return False, f"Errore: {str(e)}"
 
 # --- INTERFACCIA UTENTE ---
 
@@ -231,7 +249,7 @@ with tab_inserimento:
         if not voce_selezionata:
             st.error("Per favore, seleziona una voce di contabilità.")
         else:
-            aggiungi_transazione(
+            successo = aggiungi_transazione(
                 data=data_movimento,
                 tipo=tipo_movimento,
                 voce=voce_selezionata,
@@ -239,10 +257,11 @@ with tab_inserimento:
                 descrizione=descrizione_movimento,
                 ricevuta_file=scansione_ricevuta
             )
-            st.success(f"Movimento registrato con successo: {tipo_movimento} di {importo_movimento:.2f} € sotto la voce '{voce_selezionata}'!")
-            st.balloons()
-            # Ricarica per aggiornare i dati
-            st.rerun()
+            if successo:
+                st.success(f"Movimento registrato con successo: {tipo_movimento} di {importo_movimento:.2f} € sotto la voce '{voce_selezionata}'!")
+                st.balloons()
+                # Ricarica per aggiornare i dati
+                st.rerun()
 
 
 # --- TAB 2: RESOCONTO & ANALISI ---
@@ -311,7 +330,7 @@ with tab_resoconto:
             
             # Formattazione colonne per visualizzazione ottimale
             df_display = df_transazioni.copy()
-            df_display.columns = ['ID', 'Data', 'Tipo', 'Voce / Categoria', 'Importo (€)', 'Descrizione', 'Ricevuta Originale', 'Percorso Ricevuta']
+            df_display.columns = ['ID', 'Data', 'Tipo', 'Voce / Categoria', 'Importo (€)', 'Descrizione', 'Ricevuta Originale', 'Percorso Ricevuta', 'Creato il']
             
             # Mostriamo la tabella interattiva
             st.dataframe(
