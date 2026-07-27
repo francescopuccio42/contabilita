@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (local SQLite, now using Supabase)
+contabilita.db
+
+# Uploaded receipts
+ricevute_uploads/
+
+# Virtual environment
+.venv/
+venv/
