@@ -30,13 +30,54 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 METODI_PAGAMENTO = ["Contante", "Bonifico", "Carta", "Assegno", "Altro"]
 
+# ─── Supabase Storage ──────────────────────────────────────
+STORAGE_BUCKET = "ricevute"
+SUPABASE_STORAGE_URL = f"{SUPABASE_URL}/storage/v1/object/public/{STORAGE_BUCKET}"
+
+def upload_ricevuta_storage(file_obj, nome_file):
+    """Carica una ricevuta su Supabase Storage e restituisce il nome salvato."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nome_pulito = "".join([c if c.isalnum() or c in ['.', '_', '-'] else '_' for c in nome_file])
+    nome_salvato = f"{timestamp}_{nome_pulito}"
+    try:
+        supabase.storage.from_(STORAGE_BUCKET).upload(
+            nome_salvato,
+            file_obj.read(),
+            {"content-type": "application/octet-stream"}
+        )
+        return nome_salvato
+    except Exception as e:
+        st.warning(f"Storage non disponibile, salvo in locale: {e}")
+        # Fallback: salva in locale
+        percorso = os.path.join(UPLOAD_DIR, nome_salvato)
+        with open(percorso, "wb") as f:
+            f.write(file_obj.getvalue() if hasattr(file_obj, 'getvalue') else file_obj.read())
+        return nome_salvato
+
+def get_ricevuta_url(nome_file):
+    """Restituisce URL pubblico della ricevuta o None."""
+    if not nome_file:
+        return None
+    return f"{SUPABASE_STORAGE_URL}/{nome_file}"
+
+def scarica_ricevuta(nome_file):
+    """Scarica una ricevuta da Supabase Storage."""
+    try:
+        resp = supabase.storage.from_(STORAGE_BUCKET).download(nome_file)
+        return resp
+    except Exception:
+        # Fallback: cerca in locale
+        percorso = os.path.join(UPLOAD_DIR, nome_file)
+        if os.path.exists(percorso):
+            with open(percorso, "rb") as f:
+                return f.read()
+        return None
+
 # ─── LOGIN ─────────────────────────────────────────────────
-# Utenti autorizzati (da secrets.toml)
 UTENTI = {
     st.secrets.get("LOGIN_USERNAME", "admin"): st.secrets.get("LOGIN_PASSWORD", "admin"),
     st.secrets.get("LOGIN_USERNAME_2", ""): st.secrets.get("LOGIN_PASSWORD_2", ""),
 }
-# Rimuovi eventuali utenti vuoti
 UTENTI = {k: v for k, v in UTENTI.items() if k and v}
 
 if "autenticato" not in st.session_state:
@@ -130,7 +171,7 @@ def init_db():
             if not existing.data:
                 supabase.table("categorie").insert({"tipo": tipo, "nome": nome}).execute()
         except Exception:
-            pass  # Ignora errori RLS, le categorie sono già state create
+            pass
 
 try:
     init_db()
@@ -141,13 +182,9 @@ def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, d
     ricevuta_nome = None
     ricevuta_percorso = None
     if ricevuta_file is not None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        nome_file_pulito = "".join([c if c.isalnum() or c in ['.', '_', '-'] else '_' for c in ricevuta_file.name])
+        nome_salvato = upload_ricevuta_storage(ricevuta_file, ricevuta_file.name)
         ricevuta_nome = ricevuta_file.name
-        nome_salvataggio = f"{timestamp}_{nome_file_pulito}"
-        ricevuta_percorso = os.path.join(UPLOAD_DIR, nome_salvataggio)
-        with open(ricevuta_percorso, "wb") as f:
-            shutil.copyfileobj(ricevuta_file, f)
+        ricevuta_percorso = nome_salvato
     data_inserimento = {
         "data": data, "tipo": tipo, "voce": voce, "importo": importo,
         "metodo_pagamento": metodo_pagamento,
@@ -176,11 +213,17 @@ def ottieni_transazioni(data_inizio=None, data_fine=None):
     return pd.DataFrame()
 
 def elimina_transazione(id_transazione, percorso_ricevuta):
-    if percorso_ricevuta and os.path.exists(percorso_ricevuta):
+    if percorso_ricevuta:
         try:
-            os.remove(percorso_ricevuta)
-        except Exception as e:
-            st.error(f"Errore eliminazione file: {e}")
+            supabase.storage.from_(STORAGE_BUCKET).remove([percorso_ricevuta])
+        except Exception:
+            pass
+        percorso_locale = os.path.join(UPLOAD_DIR, percorso_ricevuta)
+        if os.path.exists(percorso_locale):
+            try:
+                os.remove(percorso_locale)
+            except Exception:
+                pass
     supabase.table("transazioni").delete().eq("id", id_transazione).execute()
 
 def ottieni_categorie(tipo=None):
@@ -345,28 +388,17 @@ elif pagina == "Resoconto & analisi":
         totale_uscite = df_uscite['importo'].sum()
         saldo = totale_entrate - totale_uscite
         
-        # Metriche colorate
         st.markdown("#### :material/bar_chart: Riepilogo")
         with st.container(horizontal=True):
+            st.metric(":material/trending_up: Entrate", f"{totale_entrate:,.2f} EUR", border=True)
+            st.metric(":material/trending_down: Uscite", f"{totale_uscite:,.2f} EUR", border=True)
             st.metric(
-                ":material/trending_up: Entrate",
-                f"{totale_entrate:,.2f} EUR",
-                border=True
-            )
-            st.metric(
-                ":material/trending_down: Uscite",
-                f"{totale_uscite:,.2f} EUR",
-                border=True
-            )
-            st.metric(
-                ":material/balance: Saldo",
-                f"{saldo:,.2f} EUR",
+                ":material/balance: Saldo", f"{saldo:,.2f} EUR",
                 delta=f"{saldo:,.2f} EUR",
                 delta_color="normal" if saldo >= 0 else "inverse",
                 border=True
             )
         
-        # Pulsante stampa
         testo_resoconto = genera_testo_resoconto(
             df_transazioni,
             data_inizio_filtro.strftime("%d/%m/%Y"),
@@ -397,7 +429,6 @@ elif pagina == "Resoconto & analisi":
             df_display = df_transazioni.copy()
             df_display.columns = ['ID', 'Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Metodo', 'Persona', 'Descrizione', 'Ricevuta', 'Percorso', 'Creato']
             
-            # Colore righe per tipo
             def color_tipo(val):
                 if val == 'Entrata':
                     return 'color: #16A34A; font-weight: 600;'
@@ -433,15 +464,18 @@ elif pagina == "Resoconto & analisi":
                         st.write(f"- **Note:** {mov['descrizione'] or 'Nessuna'}")
                         if mov['ricevuta_nome']:
                             st.write(f"- **Ricevuta:** {mov['ricevuta_nome']}")
-                            if mov['ricevuta_percorso'] and os.path.exists(mov['ricevuta_percorso']):
-                                with open(mov['ricevuta_percorso'], "rb") as f:
-                                    st.download_button(
-                                        ":material/download: Scarica ricevuta",
-                                        data=f.read(),
-                                        file_name=mov['ricevuta_nome']
-                                    )
-                                if os.path.splitext(mov['ricevuta_nome'])[1].lower() in ['.png', '.jpg', '.jpeg']:
-                                    st.image(mov['ricevuta_percorso'], width=400)
+                            # Prova a scaricare dallo storage
+                            dati_ricevuta = scarica_ricevuta(mov['ricevuta_percorso'])
+                            if dati_ricevuta:
+                                st.download_button(
+                                    ":material/download: Scarica ricevuta",
+                                    data=dati_ricevuta,
+                                    file_name=mov['ricevuta_nome']
+                                )
+                                # Mostra anteprima se immagine
+                                ext = os.path.splitext(mov['ricevuta_nome'])[1].lower()
+                                if ext in ['.png', '.jpg', '.jpeg']:
+                                    st.image(dati_ricevuta, width=400)
                 with ca2:
                     st.warning(":material/delete_forever: Eliminazione permanente")
                     if st.button(":material/delete: Elimina movimento", type="secondary", use_container_width=True):
