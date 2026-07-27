@@ -3,13 +3,15 @@
 -- Esegui questo script nel SQL Editor di Supabase Dashboard
 -- ============================================================
 
--- 1. Tabella transazioni
+-- 1. Tabella transazioni (con metodo_pagamento e persona)
 CREATE TABLE IF NOT EXISTS transazioni (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     data DATE NOT NULL,
     tipo TEXT NOT NULL CHECK (tipo IN ('Entrata', 'Uscita')),
     voce TEXT NOT NULL,
     importo DOUBLE PRECISION NOT NULL,
+    metodo_pagamento TEXT NOT NULL DEFAULT 'Contante' CHECK (metodo_pagamento IN ('Contante', 'Bonifico', 'Carta', 'Assegno', 'Altro')),
+    persona TEXT DEFAULT '',
     descrizione TEXT,
     ricevuta_nome TEXT,
     ricevuta_percorso TEXT,
@@ -46,7 +48,10 @@ INSERT INTO categorie (tipo, nome) VALUES
     ('Uscita', 'Altro (Uscita)')
 ON CONFLICT (nome) DO NOTHING;
 
--- 4. Abilita Row Level Security (opzionale, disabilitato per semplicità)
--- Se vuoi usare RLS in futuro, decommenta:
--- ALTER TABLE transazioni ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE categorie ENABLE ROW LEVEL SECURITY;
+-- 4. Aggiungi colonna persona se non esiste già (per aggiornamento)
+ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS persona TEXT DEFAULT '';
+
+-- 5. Disabilita Row Level Security per permettere operazioni CRUD
+--    con la chiave anonima (necessario per l'app Streamlit)
+ALTER TABLE transazioni DISABLE ROW LEVEL SECURITY;
+ALTER TABLE categorie DISABLE ROW LEVEL SECURITY;
