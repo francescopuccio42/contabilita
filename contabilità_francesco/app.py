@@ -48,37 +48,38 @@ def upload_ricevuta_storage(file_obj, nome_file):
         return nome_salvato
     except Exception as e:
         st.warning(f"Storage non disponibile, salvo in locale: {e}")
-        # Fallback: salva in locale
         percorso = os.path.join(UPLOAD_DIR, nome_salvato)
         with open(percorso, "wb") as f:
             f.write(file_obj.getvalue() if hasattr(file_obj, 'getvalue') else file_obj.read())
         return nome_salvato
 
 def get_ricevuta_url(nome_file):
-    """Restituisce URL pubblico della ricevuta o None."""
     if not nome_file:
         return None
     return f"{SUPABASE_STORAGE_URL}/{nome_file}"
 
 def scarica_ricevuta(nome_file):
-    """Scarica una ricevuta da Supabase Storage."""
     try:
         resp = supabase.storage.from_(STORAGE_BUCKET).download(nome_file)
         return resp
     except Exception:
-        # Fallback: cerca in locale
         percorso = os.path.join(UPLOAD_DIR, nome_file)
         if os.path.exists(percorso):
             with open(percorso, "rb") as f:
                 return f.read()
         return None
 
-# ─── LOGIN ─────────────────────────────────────────────────
-UTENTI = {
-    st.secrets.get("LOGIN_USERNAME", "admin"): st.secrets.get("LOGIN_PASSWORD", "admin"),
-    st.secrets.get("LOGIN_USERNAME_2", ""): st.secrets.get("LOGIN_PASSWORD_2", ""),
-}
-UTENTI = {k: v for k, v in UTENTI.items() if k and v}
+# ─── LOGIN (automatico: legge tutti i LOGIN_USERNAME* dai secrets) ──
+UTENTI = {}
+for key, value in st.secrets.items():
+    if key.startswith("LOGIN_USERNAME"):
+        suffix = key.replace("LOGIN_USERNAME", "")
+        password_key = f"LOGIN_PASSWORD{suffix}"
+        password = st.secrets.get(password_key, "")
+        if value and password:
+            UTENTI[value] = password
+if not UTENTI:
+    UTENTI = {"admin": "admin"}
 
 if "autenticato" not in st.session_state:
     st.session_state.autenticato = False
@@ -464,7 +465,6 @@ elif pagina == "Resoconto & analisi":
                         st.write(f"- **Note:** {mov['descrizione'] or 'Nessuna'}")
                         if mov['ricevuta_nome']:
                             st.write(f"- **Ricevuta:** {mov['ricevuta_nome']}")
-                            # Prova a scaricare dallo storage
                             dati_ricevuta = scarica_ricevuta(mov['ricevuta_percorso'])
                             if dati_ricevuta:
                                 st.download_button(
@@ -472,7 +472,6 @@ elif pagina == "Resoconto & analisi":
                                     data=dati_ricevuta,
                                     file_name=mov['ricevuta_nome']
                                 )
-                                # Mostra anteprima se immagine
                                 ext = os.path.splitext(mov['ricevuta_nome'])[1].lower()
                                 if ext in ['.png', '.jpg', '.jpeg']:
                                     st.image(dati_ricevuta, width=400)
