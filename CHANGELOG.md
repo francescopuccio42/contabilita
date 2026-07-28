@@ -2,6 +2,16 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [2.2.0] — 2026-07-28
+
+### Aggiunto
+- **Archivio ricevute**: nuova pagina dedicata per visualizzare, cercare e scaricare tutte le ricevute caricate, con filtri per tipo, anno e descrizione.
+- **Archivio pagamenti**: nuova pagina con lo storico completo di tutti i pagamenti registrati, filtri avanzati (tipo, metodo, anno, persona), riepilogo entrate/uscite/saldo ed export CSV.
+- **Salvataggio ricevute in sottocartelle**: le ricevute salvate localmente vengono ora organizzate in cartelle `anno/mese` per una migliore gestione.
+
+### Modificato
+- **Navigazione**: aggiornata la barra laterale con le nuove voci "Archivio ricevute" e "Archivio pagamenti".
+
 ## [2.1.0] — 2026-07-28
 
 ### Aggiunto

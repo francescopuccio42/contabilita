@@ -49,8 +49,14 @@ def upload_ricevuta_storage(file_obj, nome_file):
         )
         return nome_salvato
     except Exception as e:
-        st.warning(f"Storage non disponibile, salvo in locale: {e}")
-        percorso = os.path.join(UPLOAD_DIR, nome_salvato)
+        # Create subdirectories based on date
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        date_part = timestamp[:8]  # YYYYMMDD
+        year = date_part[:4]
+        month = date_part[4:6]
+        local_dir = os.path.join(UPLOAD_DIR, year, month)
+        os.makedirs(local_dir, exist_ok=True)
+        percorso = os.path.join(local_dir, nome_salvato)
         with open(percorso, "wb") as f:
             f.write(file_obj.getvalue() if hasattr(file_obj, 'getvalue') else file_obj.read())
         return nome_salvato
@@ -132,8 +138,8 @@ with st.sidebar:
     
     pagina = st.radio(
         "Navigazione",
-        ["Nuova registrazione", "Scadenzario & Promemoria", "Resoconto & analisi", "Gestione categorie"],
-        captions=["Aggiungi un movimento", "Gestisci scadenze e promemoria", "Vedi entrate/uscite/grafici", "Modifica le voci contabili"],
+        ["Nuova registrazione", "Scadenzario & Promemoria", "Resoconto & analisi", "Archivio ricevute", "Archivio pagamenti", "Gestione categorie"],
+        captions=["Aggiungi un movimento", "Gestisci scadenze e promemoria", "Vedi entrate/uscite/grafici", "Visualizza e cerca ricevute", "Storico completo pagamenti", "Modifica le voci contabili"],
         label_visibility="collapsed",
         key="nav"
     )
@@ -869,6 +875,144 @@ elif pagina == "Resoconto & analisi":
                             um.columns = ['Metodo', 'Totale (EUR)']
                             st.dataframe(um, width='stretch', hide_index=True)
                             st.bar_chart(data=um, x='Metodo', y='Totale (EUR)', color="#DC2626")
+
+# ─── PAGINA: ARCHIVIO RICEVUTE ────────────────────────────
+elif pagina == "Archivio ricevute":
+    st.markdown("### :material/folder: Archivio ricevute")
+    st.caption("Visualizza, cerca e scarica tutte le ricevute caricate.")
+    
+    # Ottieni tutte le transazioni che hanno una ricevuta
+    df_tutte = ottieni_transazioni()
+    df_con_ricevute = df_tutte[df_tutte['ricevuta_nome'].notna() & (df_tutte['ricevuta_nome'] != '')].copy()
+    
+    if df_con_ricevute.empty:
+        st.info(":material/info: Nessuna ricevuta caricata. Vai in *Nuova registrazione* per caricare una ricevuta.")
+    else:
+        # Filtri
+        col_filtri_r1, col_filtri_r2, col_filtri_r3 = st.columns(3)
+        with col_filtri_r1:
+            filtro_tipo_r = st.selectbox("Filtra per tipo", ["Tutti", "Entrata", "Uscita"], key="filtro_tipo_ricevuta")
+        with col_filtri_r2:
+            # Estrai anni disponibili
+            df_con_ricevute['anno'] = pd.to_datetime(df_con_ricevute['data']).dt.year
+            anni_disponibili = sorted(df_con_ricevute['anno'].unique(), reverse=True)
+            filtro_anno_r = st.selectbox("Filtra per anno", ["Tutti"] + [str(a) for a in anni_disponibili], key="filtro_anno_ricevuta")
+        with col_filtri_r3:
+            # Cerca per descrizione
+            filtro_testo_r = st.text_input(":material/search: Cerca per descrizione", placeholder="Testo...", key="filtro_testo_ricevuta")
+        
+        # Applica filtri
+        df_filtrate = df_con_ricevute.copy()
+        if filtro_tipo_r != "Tutti":
+            df_filtrate = df_filtrate[df_filtrate['tipo'] == filtro_tipo_r]
+        if filtro_anno_r != "Tutti":
+            df_filtrate = df_filtrate[df_filtrate['anno'] == int(filtro_anno_r)]
+        if filtro_testo_r:
+            df_filtrate = df_filtrate[df_filtrate['descrizione'].str.contains(filtro_testo_r, case=False, na=False)]
+        
+        st.markdown(f"**{len(df_filtrate)} ricevute trovate**")
+        
+        # Mostra ricevute in griglia
+        cols_per_row = 3
+        for i in range(0, len(df_filtrate), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for j, (idx, row) in enumerate(df_filtrate.iloc[i:i+cols_per_row].iterrows()):
+                with cols[j]:
+                    with st.container(border=True):
+                        st.markdown(f"**{row['ricevuta_nome']}**")
+                        st.caption(f"{row['data']} | {row['tipo']} | {row['voce']}")
+                        if row['descrizione']:
+                            st.caption(f"📝 {row['descrizione']}")
+                        if row.get('importo'):
+                            st.markdown(f"**{row['importo']:.2f} EUR**")
+                        
+                        # Mostra anteprima e download
+                        dati_ricevuta = scarica_ricevuta(row['ricevuta_percorso'])
+                        if dati_ricevuta:
+                            ext = os.path.splitext(row['ricevuta_nome'])[1].lower()
+                            if ext in ['.png', '.jpg', '.jpeg']:
+                                st.image(dati_ricevuta, width=250)
+                            st.download_button(
+                                ":material/download: Scarica",
+                                data=dati_ricevuta,
+                                file_name=row['ricevuta_nome'],
+                                key=f"dl_ricevuta_{row['id']}",
+                                use_container_width=True
+                            )
+                        else:
+                            st.warning("File non disponibile")
+
+# ─── PAGINA: ARCHIVIO PAGAMENTI ────────────────────────────
+elif pagina == "Archivio pagamenti":
+    st.markdown("### :material/payments: Archivio pagamenti")
+    st.caption("Storico completo di tutti i pagamenti registrati.")
+    
+    # Ottieni tutte le transazioni
+    df_tutte_pag = ottieni_transazioni()
+    
+    if df_tutte_pag.empty:
+        st.info(":material/info: Nessun pagamento registrato.")
+    else:
+        # Filtri
+        col_filtri_p1, col_filtri_p2, col_filtri_p3, col_filtri_p4 = st.columns(4)
+        with col_filtri_p1:
+            filtro_tipo_p = st.selectbox("Tipo", ["Tutti", "Entrata", "Uscita"], key="filtro_tipo_pag")
+        with col_filtri_p2:
+            filtro_metodo_p = st.selectbox("Metodo", ["Tutti"] + METODI_PAGAMENTO, key="filtro_metodo_pag")
+        with col_filtri_p3:
+            # Estrai anni
+            df_tutte_pag['anno_p'] = pd.to_datetime(df_tutte_pag['data']).dt.year
+            anni_p = sorted(df_tutte_pag['anno_p'].unique(), reverse=True)
+            filtro_anno_p = st.selectbox("Anno", ["Tutti"] + [str(a) for a in anni_p], key="filtro_anno_pag")
+        with col_filtri_p4:
+            filtro_persona_p = st.text_input(":material/person: Persona", placeholder="Cerca...", key="filtro_persona_pag")
+        
+        # Applica filtri
+        df_pag_filtrate = df_tutte_pag.copy()
+        if filtro_tipo_p != "Tutti":
+            df_pag_filtrate = df_pag_filtrate[df_pag_filtrate['tipo'] == filtro_tipo_p]
+        if filtro_metodo_p != "Tutti":
+            df_pag_filtrate = df_pag_filtrate[df_pag_filtrate['metodo_pagamento'] == filtro_metodo_p]
+        if filtro_anno_p != "Tutti":
+            df_pag_filtrate = df_pag_filtrate[df_pag_filtrate['anno_p'] == int(filtro_anno_p)]
+        if filtro_persona_p:
+            df_pag_filtrate = df_pag_filtrate[df_pag_filtrate['persona'].str.contains(filtro_persona_p, case=False, na=False)]
+        
+        # Riepilogo
+        tot_entrate_p = df_pag_filtrate[df_pag_filtrate['tipo'] == 'Entrata']['importo'].sum()
+        tot_uscite_p = df_pag_filtrate[df_pag_filtrate['tipo'] == 'Uscita']['importo'].sum()
+        
+        col_riep_p1, col_riep_p2, col_riep_p3 = st.columns(3)
+        with col_riep_p1:
+            st.metric(":material/trending_up: Entrate", f"{tot_entrate_p:,.2f} EUR", border=True)
+        with col_riep_p2:
+            st.metric(":material/trending_down: Uscite", f"{tot_uscite_p:,.2f} EUR", border=True)
+        with col_riep_p3:
+            st.metric(":material/balance: Saldo", f"{tot_entrate_p - tot_uscite_p:,.2f} EUR", border=True)
+        
+        st.markdown(f"**{len(df_pag_filtrate)} pagamenti trovati**")
+        
+        # Mostra tabella
+        df_display_p = df_pag_filtrate[['data', 'tipo', 'voce', 'importo', 'metodo_pagamento', 'persona', 'descrizione']].copy()
+        df_display_p.columns = ['Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Metodo', 'Persona', 'Descrizione']
+        
+        def color_tipo_p(val):
+            if val == 'Entrata':
+                return 'color: #16A34A; font-weight: 600;'
+            return 'color: #DC2626; font-weight: 600;'
+        
+        styled_p = df_display_p.style.map(color_tipo_p, subset=['Tipo']).format({'Importo (EUR)': '{:,.2f}'})
+        st.dataframe(styled_p, width='stretch', hide_index=True)
+        
+        # Export CSV
+        csv_data = df_display_p.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            ":material/download: Scarica CSV",
+            data=csv_data,
+            file_name=f"pagamenti_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
 # ─── PAGINA: GESTIONE CATEGORIE ────────────────────────────
 elif pagina == "Gestione categorie":
