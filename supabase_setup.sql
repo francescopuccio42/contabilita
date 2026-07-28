@@ -55,3 +55,23 @@ ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS persona TEXT DEFAULT '';
 --    con la chiave anonima (necessario per l'app Streamlit)
 ALTER TABLE transazioni DISABLE ROW LEVEL SECURITY;
 ALTER TABLE categorie DISABLE ROW LEVEL SECURITY;
+
+-- 6. Tabella scadenze (per lo scadenzario con promemoria e ricorrenze)
+CREATE TABLE IF NOT EXISTS scadenze (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    descrizione TEXT NOT NULL,
+    tipo TEXT NOT NULL DEFAULT 'Uscita' CHECK (tipo IN ('Entrata', 'Uscita')),
+    voce TEXT NOT NULL,
+    importo DOUBLE PRECISION NOT NULL,
+    data_scadenza DATE NOT NULL,
+    ricorrenza TEXT NOT NULL DEFAULT 'Nessuna' CHECK (ricorrenza IN ('Nessuna', 'Settimanale', 'Quindicinale', 'Mensile', 'Bimestrale', 'Trimestrale', 'Semestrale', 'Annuale')),
+    metodo_pagamento TEXT DEFAULT 'Bonifico',
+    persona TEXT DEFAULT '',
+    stato TEXT NOT NULL DEFAULT 'In attesa' CHECK (stato IN ('In attesa', 'Pagato')),
+    note TEXT DEFAULT '',
+    ultimo_pagamento DATE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE scadenze DISABLE ROW LEVEL SECURITY;
+

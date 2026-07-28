@@ -2,6 +2,15 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [2.1.0] — 2026-07-28
+
+### Aggiunto
+- **Modulo Scadenzario & Promemoria**: nuova sezione per la registrazione e gestione delle scadenze di entrate e uscite.
+- **Promemoria automatici (7 giorni prima)**: banner di notifica globale nell'interfaccia dell'app che avvisa delle scadenze imminenti e scadute.
+- **Supporto Scadenze Ricorrenti**: gestione della ripetizione (*Settimanale, Quindicinale, Mensile, Bimestrale, Trimestrale, Semestrale, Annuale*).
+- **Automazione Saldo Contabile**: al click su "Segna come Pagato", registra automaticamente il movimento contabile in `transazioni` e aggiorna la scadenza successiva per le scadenze ripetute.
+- **Tabella Supabase `scadenze`**: aggiornato lo script `supabase_setup.sql` per la creazione della nuova tabella nel database backend.
+
 ## [1.1.0] — 2026-07-27
 
 ### Aggiunto

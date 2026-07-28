@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import os
 import shutil
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from dateutil.relativedelta import relativedelta
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -29,6 +30,7 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "ricevute_uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 METODI_PAGAMENTO = ["Contante", "Bonifico", "Carta", "Assegno", "Altro"]
+RICORRENZE = ["Nessuna", "Settimanale", "Quindicinale", "Mensile", "Bimestrale", "Trimestrale", "Semestrale", "Annuale"]
 
 # ─── Supabase Storage ──────────────────────────────────────
 STORAGE_BUCKET = "ricevute"
@@ -130,8 +132,8 @@ with st.sidebar:
     
     pagina = st.radio(
         "Navigazione",
-        ["Nuova registrazione", "Resoconto & analisi", "Gestione categorie"],
-        captions=["Aggiungi un movimento", "Vedi entrate/uscite/grafici", "Modifica le voci contabili"],
+        ["Nuova registrazione", "Scadenzario & Promemoria", "Resoconto & analisi", "Gestione categorie"],
+        captions=["Aggiungi un movimento", "Gestisci scadenze e promemoria", "Vedi entrate/uscite/grafici", "Modifica le voci contabili"],
         label_visibility="collapsed",
         key="nav"
     )
@@ -250,6 +252,130 @@ def aggiungi_categoria(tipo, nome):
     except Exception as e:
         return False, f"Errore: {str(e)}"
 
+# ─── Funzioni Scadenzario & Promemoria ─────────────────────
+def calcola_prossima_data(data_scadenza_input, ricorrenza):
+    if isinstance(data_scadenza_input, str):
+        data_base = datetime.strptime(data_scadenza_input, "%Y-%m-%d").date()
+    else:
+        data_base = data_scadenza_input
+
+    if ricorrenza == "Settimanale":
+        nuova_data = data_base + timedelta(days=7)
+    elif ricorrenza == "Quindicinale":
+        nuova_data = data_base + timedelta(days=15)
+    elif ricorrenza == "Mensile":
+        nuova_data = data_base + relativedelta(months=1)
+    elif ricorrenza == "Bimestrale":
+        nuova_data = data_base + relativedelta(months=2)
+    elif ricorrenza == "Trimestrale":
+        nuova_data = data_base + relativedelta(months=3)
+    elif ricorrenza == "Semestrale":
+        nuova_data = data_base + relativedelta(months=6)
+    elif ricorrenza == "Annuale":
+        nuova_data = data_base + relativedelta(years=1)
+    else:
+        nuova_data = data_base
+
+    return nuova_data.strftime("%Y-%m-%d")
+
+def ottieni_scadenze(stato=None):
+    try:
+        query = supabase.table("scadenze").select("*")
+        if stato:
+            query = query.eq("stato", stato)
+        query = query.order("data_scadenza", desc=False)
+        response = query.execute()
+        if response.data:
+            return pd.DataFrame(response.data)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+def aggiungi_scadenza(descrizione, tipo, voce, importo, data_scadenza, ricorrenza, metodo_pagamento, persona, note):
+    descrizione = descrizione.strip()
+    if not descrizione:
+        return False, "La descrizione è obbligatoria."
+    if importo <= 0:
+        return False, "L'importo deve essere maggiore di zero."
+        
+    data_inserimento = {
+        "descrizione": descrizione,
+        "tipo": tipo,
+        "voce": voce,
+        "importo": importo,
+        "data_scadenza": str(data_scadenza),
+        "ricorrenza": ricorrenza,
+        "metodo_pagamento": metodo_pagamento,
+        "persona": persona.strip() if persona else "",
+        "stato": "In attesa",
+        "note": note.strip() if note else ""
+    }
+    try:
+        response = supabase.table("scadenze").insert(data_inserimento).execute()
+        return True, "Scadenza registrata con successo!"
+    except Exception as e:
+        return False, f"Errore durante l'inserimento: {str(e)}"
+
+def elimina_scadenza(id_scadenza):
+    try:
+        supabase.table("scadenze").delete().eq("id", id_scadenza).execute()
+        return True
+    except Exception:
+        return False
+
+def registra_pagamento_scadenza(scadenza_row, data_pagamento, metodo_pagamento):
+    """
+    Registra il pagamento di una scadenza:
+    1. Crea un movimento in 'transazioni' (importo, voce, tipo, metodo, persona, descrizione).
+    2. Se ricorrenza == 'Nessuna' -> stato = 'Pagato'
+    3. Se ricorrenza != 'Nessuna' -> calcola la nuova data_scadenza e la aggiorna nel DB mantenendo stato = 'In attesa'
+    """
+    data_str = str(data_pagamento)
+    metodo = metodo_pagamento if metodo_pagamento else scadenza_row.get("metodo_pagamento", "Bonifico")
+    persona = scadenza_row.get("persona", "")
+    descrizione_tx = f"Pagamento scadenza: {scadenza_row['descrizione']}"
+    if scadenza_row.get("note"):
+        descrizione_tx += f" - {scadenza_row['note']}"
+    
+    data_transazione = {
+        "data": data_str,
+        "tipo": scadenza_row["tipo"],
+        "voce": scadenza_row["voce"],
+        "importo": float(scadenza_row["importo"]),
+        "metodo_pagamento": metodo,
+        "persona": persona if persona else None,
+        "descrizione": descrizione_tx
+    }
+    
+    try:
+        response = supabase.table("transazioni").insert(data_transazione).execute()
+        if hasattr(response, 'error') and response.error:
+            return False, f"Errore registrazione transazione: {response.error}"
+    except Exception as e:
+        return False, f"Errore registrazione transazione: {str(e)}"
+        
+    ricorrenza = scadenza_row.get("ricorrenza", "Nessuna")
+    id_scadenza = int(scadenza_row["id"])
+    
+    if ricorrenza == "Nessuna":
+        update_data = {
+            "stato": "Pagato",
+            "ultimo_pagamento": data_str
+        }
+    else:
+        prossima_data = calcola_prossima_data(scadenza_row["data_scadenza"], ricorrenza)
+        update_data = {
+            "data_scadenza": prossima_data,
+            "ultimo_pagamento": data_str,
+            "stato": "In attesa"
+        }
+        
+    try:
+        supabase.table("scadenze").update(update_data).eq("id", id_scadenza).execute()
+        return True, "Pagamento registrato nelle transazioni e scadenza aggiornata!"
+    except Exception as e:
+        return False, f"Transazione creata ma errore aggiornamento scadenza: {str(e)}"
+
 def genera_testo_resoconto(df, data_inizio, data_fine):
     df_entrate = df[df['tipo'] == 'Entrata']
     df_uscite = df[df['tipo'] == 'Uscita']
@@ -308,10 +434,40 @@ st.markdown("""
             💶 Gestionale Contabilità Francesco
         </h1>
         <p style='color: #64748B; margin: 0.2rem 0 0 0; font-size: 0.95rem;'>
-            Monitora entrate, uscite e archivia ricevute
+            Monitora entrate, uscite, scadenze e archivia ricevute
         </p>
     </div>
 """, unsafe_allow_html=True)
+
+# ─── PROMEMORIA SCADENZE GLOBAL BANNER ─────────────────────
+try:
+    df_scadenze_attesa_global = ottieni_scadenze(stato="In attesa")
+    if not df_scadenze_attesa_global.empty:
+        oggi_g = date.today()
+        limite_7gg_g = oggi_g + timedelta(days=7)
+        df_scadenze_attesa_global['dt_scad_g'] = pd.to_datetime(df_scadenze_attesa_global['data_scadenza']).dt.date
+        
+        df_scadute_g = df_scadenze_attesa_global[df_scadenze_attesa_global['dt_scad_g'] < oggi_g]
+        df_imminenti_g = df_scadenze_attesa_global[(df_scadenze_attesa_global['dt_scad_g'] >= oggi_g) & (df_scadenze_attesa_global['dt_scad_g'] <= limite_7gg_g)]
+        
+        cnt_scad = len(df_scadute_g)
+        cnt_imm = len(df_imminenti_g)
+        tot_scad = df_scadute_g['importo'].sum() if not df_scadute_g.empty else 0.0
+        tot_imm = df_imminenti_g['importo'].sum() if not df_imminenti_g.empty else 0.0
+
+        if cnt_scad > 0 or cnt_imm > 0:
+            st.space("small")
+            with st.container(border=True):
+                st.markdown("#### :material/notifications_active: Promemoria Scadenze")
+                c_prom1, c_prom2 = st.columns(2)
+                if cnt_scad > 0:
+                    with c_prom1:
+                        st.error(f"🚨 **{cnt_scad} scadenze SCADUTE** per un totale di **{tot_scad:,.2f} EUR**! Vai in *Scadenzario & Promemoria* per regolarizzarle.")
+                if cnt_imm > 0:
+                    with c_prom2:
+                        st.warning(f"⏰ **{cnt_imm} scadenze in arrivo (entro 7 gg)** per **{tot_imm:,.2f} EUR**.")
+except Exception:
+    pass
 
 st.space("small")
 
@@ -361,6 +517,195 @@ if pagina == "Nuova registrazione":
                 st.success(f"✅ Registrato: {tipo_movimento} {importo_movimento:.2f} EUR ({metodo_pagamento})")
                 st.balloons()
                 st.rerun()
+
+# ─── PAGINA: SCADENZARIO & PROMEMORIA ───────────────────────
+elif pagina == "Scadenzario & Promemoria":
+    st.markdown("### :material/calendar_clock: Scadenzario & Promemoria")
+    st.caption("Gestisci le tue scadenze, imposta le frequenze di ripetizione e ricevi promemoria automatici 1 settimana prima.")
+    
+    # Verifica esistenza tabella scadenze su Supabase
+    scadenze_table_ok = True
+    try:
+        supabase.table("scadenze").select("id").limit(1).execute()
+    except Exception:
+        scadenze_table_ok = False
+        st.error("⚠️ **Tabella `scadenze` non trovata su Supabase!**")
+        st.info("Per attivare il modulo Scadenzario, apri l'Editor SQL della tua Dashboard di Supabase ed esegui lo script seguente:")
+        with st.expander("📄 Script SQL per creare la tabella scadenze"):
+            st.code("""
+CREATE TABLE IF NOT EXISTS scadenze (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    descrizione TEXT NOT NULL,
+    tipo TEXT NOT NULL DEFAULT 'Uscita' CHECK (tipo IN ('Entrata', 'Uscita')),
+    voce TEXT NOT NULL,
+    importo DOUBLE PRECISION NOT NULL,
+    data_scadenza DATE NOT NULL,
+    ricorrenza TEXT NOT NULL DEFAULT 'Nessuna' CHECK (ricorrenza IN ('Nessuna', 'Settimanale', 'Quindicinale', 'Mensile', 'Bimestrale', 'Trimestrale', 'Semestrale', 'Annuale')),
+    metodo_pagamento TEXT DEFAULT 'Bonifico',
+    persona TEXT DEFAULT '',
+    stato TEXT NOT NULL DEFAULT 'In attesa' CHECK (stato IN ('In attesa', 'Pagato')),
+    note TEXT DEFAULT '',
+    ultimo_pagamento DATE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE scadenze DISABLE ROW LEVEL SECURITY;
+            """, language="sql")
+
+    if scadenze_table_ok:
+        df_tutte_scadenze = ottieni_scadenze()
+        oggi = date.today()
+        limite_7gg = oggi + timedelta(days=7)
+        
+        df_attesa = df_tutte_scadenze[df_tutte_scadenze['stato'] == 'In attesa'].copy() if not df_tutte_scadenze.empty else pd.DataFrame()
+        df_pagate = df_tutte_scadenze[df_tutte_scadenze['stato'] == 'Pagato'].copy() if not df_tutte_scadenze.empty else pd.DataFrame()
+        
+        if not df_attesa.empty:
+            df_attesa['dt_scad'] = pd.to_datetime(df_attesa['data_scadenza']).dt.date
+            df_scadute = df_attesa[df_attesa['dt_scad'] < oggi]
+            df_imminenti = df_attesa[(df_attesa['dt_scad'] >= oggi) & (df_attesa['dt_scad'] <= limite_7gg)]
+            df_future = df_attesa[df_attesa['dt_scad'] > limite_7gg]
+        else:
+            df_scadute = pd.DataFrame()
+            df_imminenti = pd.DataFrame()
+            df_future = pd.DataFrame()
+            
+        tot_scaduto = df_scadute['importo'].sum() if not df_scadute.empty else 0.0
+        tot_imminente = df_imminenti['importo'].sum() if not df_imminenti.empty else 0.0
+        tot_attesa = df_attesa['importo'].sum() if not df_attesa.empty else 0.0
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            st.metric(":material/warning: Scadute", f"{tot_scaduto:,.2f} EUR", f"{len(df_scadute)} scadenze", delta_color="inverse", border=True)
+        with col_m2:
+            st.metric(":material/schedule: Prossimi 7 giorni", f"{tot_imminente:,.2f} EUR", f"{len(df_imminenti)} scadenze", border=True)
+        with col_m3:
+            st.metric(":material/pending_actions: Totale in attesa", f"{tot_attesa:,.2f} EUR", f"{len(df_attesa)} scadenze", border=True)
+            
+        st.space("small")
+        
+        tab_attesa, tab_nuova, tab_storico = st.tabs([
+            ":material/format_list_bulleted: Scadenze in attesa",
+            ":material/add_circle: Nuova scadenza",
+            ":material/history: Storico pagamenti"
+        ])
+        
+        with tab_attesa:
+            if df_attesa.empty:
+                st.info(":material/info: Nessuna scadenza in attesa registrata.")
+            else:
+                filtro_urg = st.segmented_control(
+                    "Filtra urgenza",
+                    ["Tutte", "🚨 Scadute", "⏰ Prossimi 7 giorni", "🟢 Future"],
+                    default="Tutte",
+                    key="filtro_urg"
+                )
+                
+                if filtro_urg == "🚨 Scadute":
+                    df_mostra = df_scadute
+                elif filtro_urg == "⏰ Prossimi 7 giorni":
+                    df_mostra = df_imminenti
+                elif filtro_urg == "🟢 Future":
+                    df_mostra = df_future
+                else:
+                    df_mostra = df_attesa
+                    
+                if df_mostra.empty:
+                    st.info(f"Nessuna scadenza trovata per il filtro '{filtro_urg}'.")
+                else:
+                    for idx, row in df_mostra.iterrows():
+                        dt_scad = pd.to_datetime(row['data_scadenza']).date()
+                        is_scaduta = dt_scad < oggi
+                        is_imminente = oggi <= dt_scad <= limite_7gg
+                        
+                        if is_scaduta:
+                            badge_status = ":red-badge[🚨 SCADUTA]"
+                        elif is_imminente:
+                            badge_status = ":orange-badge[⏰ IN SCADENZA (7 GG)]"
+                        else:
+                            badge_status = ":green-badge[🟢 FUTURA]"
+                            
+                        tipo_badge = ":red-badge[Uscita]" if row['tipo'] == 'Uscita' else ":green-badge[Entrata]"
+                        
+                        with st.container(border=True):
+                            c1, c2, c3 = st.columns([3, 2, 2])
+                            with c1:
+                                st.markdown(f"### {row['descrizione']} {badge_status} {tipo_badge}")
+                                st.markdown(f"**Voce:** {row['voce']} | **Data Scadenza:** `{row['data_scadenza']}`")
+                                if row.get('persona'):
+                                    st.markdown(f"**Da chi / Per chi:** {row['persona']}")
+                                if row.get('note'):
+                                    st.caption(f"Note: {row['note']}")
+                            with c2:
+                                st.markdown(f"#### {row['importo']:,.2f} EUR")
+                                st.write(f"🔄 **Ricorrenza:** {row['ricorrenza']}")
+                                st.write(f"💳 **Metodo prev.:** {row.get('metodo_pagamento', 'N/D')}")
+                                if row.get('ultimo_pagamento'):
+                                    st.caption(f"Ultimo pagamento: {row['ultimo_pagamento']}")
+                            with c3:
+                                st.space("small")
+                                with st.popover(":material/check_circle: Segna come Pagato", use_container_width=True, type="primary"):
+                                    st.markdown("##### Registra Pagamento")
+                                    st.caption(f"Salda '{row['descrizione']}' ({row['importo']:.2f} EUR)")
+                                    with st.form(key=f"form_paga_{row['id']}"):
+                                        p_data = st.date_input("Data pagamento", value=oggi, key=f"pdata_{row['id']}")
+                                        p_metodo = st.selectbox("Metodo pagamento", options=METODI_PAGAMENTO, index=METODI_PAGAMENTO.index(row.get('metodo_pagamento')) if row.get('metodo_pagamento') in METODI_PAGAMENTO else 0, key=f"pmetodo_{row['id']}")
+                                        if st.form_submit_button("Conferma e Inserisci in Contabilità", type="primary", use_container_width=True):
+                                            ok_p, msg_p = registra_pagamento_scadenza(row, p_data, p_metodo)
+                                            if ok_p:
+                                                st.success(f"✅ {msg_p}")
+                                                st.balloons()
+                                                st.rerun()
+                                            else:
+                                                st.error(msg_p)
+                                
+                                if st.button(":material/delete: Elimina", key=f"del_scad_{row['id']}", use_container_width=True, type="secondary"):
+                                    if elimina_scadenza(row['id']):
+                                        st.success("Scadenza eliminata!")
+                                        st.rerun()
+
+        with tab_nuova:
+            st.markdown("#### :material/add_circle: Registra una nuova scadenza")
+            with st.container(border=True):
+                col_n1, col_n2 = st.columns(2)
+                with col_n1:
+                    n_desc = st.text_input("Descrizione *", placeholder="Es. Bolletta luce appartamenti, Rata affitto, F24...", key="n_desc")
+                    n_tipo = st.segmented_control("Tipo *", options=["Uscita", "Entrata"], default="Uscita", key="n_tipo")
+                    cats = ottieni_categorie(n_tipo)
+                    n_voce = st.selectbox("Voce contabile *", options=cats if cats else [""], key="n_voce")
+                    n_importo = st.number_input("Importo (EUR) *", min_value=0.01, value=100.00, step=0.01, format="%.2f", key="n_importo")
+                with col_n2:
+                    n_data = st.date_input("Data prima scadenza *", value=oggi, key="n_data")
+                    n_ricorrenza = st.selectbox("Ricorrenza (Ripetizione) *", options=RICORRENZE, index=3, help="Se selezionata una frequenza, dopo il pagamento la scadenza verrà automaticamente spostata alla data successiva.", key="n_ricorrenza")
+                    n_metodo = st.selectbox("Metodo di pagamento previsto", options=METODI_PAGAMENTO, index=1, key="n_metodo")
+                    n_persona = st.text_input("Da chi / Persona (opzionale)", placeholder="Cliente o fornitore...", key="n_persona")
+                    n_note = st.text_area("Note / Dettagli", placeholder="Annotazioni aggiuntive...", height=68, key="n_note")
+            
+            if st.button(":material/save: Salva Scadenza", type="primary", use_container_width=True):
+                if not n_desc:
+                    st.error("Inserisci la descrizione della scadenza.")
+                elif not n_voce:
+                    st.error("Seleziona la voce contabile.")
+                else:
+                    ok_s, msg_s = aggiungi_scadenza(
+                        n_desc, n_tipo, n_voce, n_importo, n_data,
+                        n_ricorrenza, n_metodo, n_persona, n_note
+                    )
+                    if ok_s:
+                        st.success(f"✅ {msg_s}")
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error(msg_s)
+
+        with tab_storico:
+            st.markdown("#### :material/history: Storico scadenze pagate (singole)")
+            if df_pagate.empty:
+                st.info(":material/info: Nessuna scadenza singola saldata nello storico.")
+            else:
+                df_pag_disp = df_pagate[['data_scadenza', 'ultimo_pagamento', 'tipo', 'descrizione', 'voce', 'importo', 'metodo_pagamento', 'persona']].copy()
+                df_pag_disp.columns = ['Data Prevista', 'Data Saldo', 'Tipo', 'Descrizione', 'Voce', 'Importo (EUR)', 'Metodo', 'Persona']
+                st.dataframe(df_pag_disp, width='stretch', hide_index=True)
 
 # ─── PAGINA: RESOCONTO & ANALISI ──────────────────────────
 elif pagina == "Resoconto & analisi":
