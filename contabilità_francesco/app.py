@@ -6,6 +6,7 @@ from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from contabilità_francesco.payment_methods import METODI_PAGAMENTO, normalizza_metodo_pagamento
 
 load_dotenv()
 
@@ -29,7 +30,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "ricevute_uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-METODI_PAGAMENTO = ["Contante", "Bonifico", "Carta", "Assegno", "Altro"]
 RICORRENZE = ["Nessuna", "Settimanale", "Quindicinale", "Mensile", "Bimestrale", "Trimestrale", "Semestrale", "Annuale"]
 
 # ─── Supabase Storage ──────────────────────────────────────
@@ -194,6 +194,11 @@ def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, d
         nome_salvato = upload_ricevuta_storage(ricevuta_file, ricevuta_file.name)
         ricevuta_nome = ricevuta_file.name
         ricevuta_percorso = nome_salvato
+<<<<<<< HEAD
+=======
+    metodo_pagamento = normalizza_metodo_pagamento(metodo_pagamento)
+>>>>>>> a661c3c (Aggiungi metodi pagamento Contanti e POS)
+    metodo_pagamento = normalizza_metodo_pagamento(metodo_pagamento)
     data_inserimento = {
         "data": data, "tipo": tipo, "voce": voce, "importo": importo,
         "metodo_pagamento": metodo_pagamento,
@@ -304,6 +309,11 @@ def aggiungi_scadenza(descrizione, tipo, voce, importo, data_scadenza, ricorrenz
     if importo <= 0:
         return False, "L'importo deve essere maggiore di zero."
         
+<<<<<<< HEAD
+=======
+    metodo_pagamento = normalizza_metodo_pagamento(metodo_pagamento)
+>>>>>>> a661c3c (Aggiungi metodi pagamento Contanti e POS)
+    metodo_pagamento = normalizza_metodo_pagamento(metodo_pagamento)
     data_inserimento = {
         "descrizione": descrizione,
         "tipo": tipo,
@@ -337,7 +347,11 @@ def registra_pagamento_scadenza(scadenza_row, data_pagamento, metodo_pagamento):
     3. Se ricorrenza != 'Nessuna' -> calcola la nuova data_scadenza e la aggiorna nel DB mantenendo stato = 'In attesa'
     """
     data_str = str(data_pagamento)
+<<<<<<< HEAD
     metodo = metodo_pagamento if metodo_pagamento else scadenza_row.get("metodo_pagamento", "Bonifico")
+=======
+    metodo = normalizza_metodo_pagamento(metodo_pagamento if metodo_pagamento else scadenza_row.get("metodo_pagamento", "Bonifico"))
+>>>>>>> a661c3c (Aggiungi metodi pagamento Contanti e POS)
     persona = scadenza_row.get("persona", "")
     descrizione_tx = f"Pagamento scadenza: {scadenza_row['descrizione']}"
     if scadenza_row.get("note"):

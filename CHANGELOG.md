@@ -2,6 +2,15 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [2.3.0] — 2026-07-30
+
+### Aggiunto
+- **Metodi di pagamento estesi**: ora è possibile selezionare anche "Contanti" e "POS" nelle voci di registrazione movimento, nuova scadenza e pagamento scadenza.
+- **Normalizzazione metodi**: i valori già presenti come "Contante" o "Pos" vengono convertiti automaticamente ai nuovi valori standard.
+
+### Modificato
+- **Archivio pagamenti e analisi**: il riepilogo per metodo di pagamento ora usa la lista condivisa e coerente di opzioni disponibili.
+
 ## [2.2.0] — 2026-07-28
 
 ### Aggiunto
