@@ -1610,8 +1610,8 @@ elif pagina == "Backup & Ripristino":
                 percorso = os.path.join(BACKUP_DIR, nome)
                 try:
                     dimensione = os.path.getsize(percorso) / 1024
-                    with open(percorso, "r", encoding="utf-8") as f:
-                        dati = json.load(f)
+                    with open(percorso, "r", encoding="utf-8") as f_text:
+                        dati = json.load(f_text)
                     data_creazione = dati.get("creato_il", "N/D")
                     n_tx = len(dati.get("transazioni", []))
                     n_cat = len(dati.get("categorie", []))
@@ -1623,8 +1623,8 @@ elif pagina == "Backup & Ripristino":
                             st.caption(f"Creato il: {data_creazione} • {dimensione:.1f} KB")
                             st.caption(f"📊 {n_tx} transazioni • {n_cat} categorie • {n_sc} scadenze")
                         with c2:
-                            with open(percorso, "rb") as f:
-                                dati_file = f.read()
+                            with open(percorso, "rb") as f_bin:
+                                dati_file = f_bin.read()
                             st.download_button(
                                 ":material/download:",
                                 data=dati_file,
@@ -1648,8 +1648,8 @@ elif pagina == "Backup & Ripristino":
             if backup_selezionato:
                 percorso = os.path.join(BACKUP_DIR, backup_selezionato)
                 try:
-                    with open(percorso, "r", encoding="utf-8") as f:
-                        dati = json.load(f)
+                    with open(percorso, "r", encoding="utf-8") as f_text:
+                        dati = json.load(f_text)
                     data_creazione = dati.get("creato_il", "N/D")
                     n_tx = len(dati.get("transazioni", []))
                     n_cat = len(dati.get("categorie", []))
