@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 
 # Test the directory creation logic for receipt uploads
-UPLOAD_DIR = "contabilita_francesco/ricevute_uploads"
+UPLOAD_DIR = "contabilità_francesco/ricevute_uploads"
 
 def test_upload_directory_structure():
     """Test that the upload directory structure follows YYYY/MM format."""

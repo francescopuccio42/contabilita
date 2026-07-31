@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from contabilita_francesco.payment_methods import METODI_PAGAMENTO, normalizza_metodo_pagamento
+from payment_methods import METODI_PAGAMENTO, normalizza_metodo_pagamento
 
 load_dotenv()
 

@@ -1,4 +1,4 @@
-from contabilita_francesco.payment_methods import METODI_PAGAMENTO, normalizza_metodo_pagamento
+from contabilità_francesco.payment_methods import METODI_PAGAMENTO, normalizza_metodo_pagamento
 
 
 def test_payment_methods_include_pos_and_contanti():

@@ -58,14 +58,14 @@ Webapp Streamlit per monitorare entrate, uscite e archiviare ricevute fiscali, c
      ```
    - Oppure direttamente con Streamlit:
      ```bash
-     streamlit run contabilita_francesco/app.py
+     streamlit run contabilità_francesco/app.py
      ```
 
 ## 📁 Struttura del Progetto
 
 ```
-contabilita_francesco/
-├── contabilita_francesco/
+contabilità_francesco/
+├── contabilità_francesco/
 │   ├── app.py              # Applicazione Streamlit principale
 │   └── payment_methods.py  # Metodi di pagamento (Contanti, POS, Bonifico...)
 ├── avvia_app.bat           # Avvio rapido su Windows (doppio clic)
