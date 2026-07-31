@@ -17,7 +17,7 @@ import importlib.util
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_PATH = BASE_DIR / "contabilita_francesco" / "app.py"
+APP_PATH = BASE_DIR / "app.py"
 ENV_PATH = BASE_DIR / ".env"
 SECRETS_PATH = BASE_DIR / ".streamlit" / "secrets.toml"
 
