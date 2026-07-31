@@ -4,6 +4,9 @@
 # Streamlit secrets (contiene credenziali)
 .streamlit/secrets.toml
 
+# Credenziali demo (contiene chiavi)
+demo_secrets.toml
+
 # Python cache
 __pycache__/
 *.pyc
