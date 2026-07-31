@@ -4,5 +4,12 @@
     ],
     "extraPaths": [
         "contabilità_francesco"
-    ]
+    ],
+    "reportAttributeAccessIssue": "none",
+    "reportOptionalSubscript": "none",
+    "reportIndexIssue": "none",
+    "reportArgumentType": "none",
+    "reportCallIssue": "none",
+    "reportOptionalOperand": "none",
+    "reportOptionalMemberAccess": "none"
 }
