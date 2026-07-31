@@ -18,6 +18,10 @@ from datetime import date
 from dotenv import load_dotenv
 from supabase import create_client
 
+# Assicura che gli emoji vengano stampati correttamente su Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
