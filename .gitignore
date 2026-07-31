@@ -21,3 +21,6 @@ backups/
 # Virtual environment
 .venv/
 venv/
+
+# Cartella duplicata (non necessaria)
+contabilita-main/

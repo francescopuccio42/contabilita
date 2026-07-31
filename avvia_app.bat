@@ -45,7 +45,7 @@ echo.
 echo    Apri il browser all'indirizzo: http://localhost:8501
 echo    Premi Ctrl+C nella finestra per fermare l'app.
 echo.
-python -m streamlit run "contabilità_francesco\app.py" --server.headless true
+python -m streamlit run "contabilita_francesco\app.py" --server.headless true
 
 echo.
 echo App terminata.
