@@ -2,7 +2,27 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [2.5.0] — 2026-08-01
+
+### Aggiunto
+- **Guida in linea**: nuova pagina "Guida" nell'app con manuale completo d'uso, organizzato in sezioni (Introduzione, Registrazione movimenti, Estratto conto, Prenotazioni & Ospiti, Scadenzario, Resoconto & Analisi, Ricevute & Pagamenti, Categorie, Backup & Ripristino, FAQ & Suggerimenti).
+- **Carica Estratto Conto**: nuova pagina per importare automaticamente le transazioni da file Excel (`.xlsx`, `.xls`) o CSV (`.csv`).
+- **Categorizzazione automatica**: funzione `auto_categorizza()` che riconosce automaticamente la voce contabile in base alla descrizione (bollette, affitti, stipendi, F24, tasse di soggiorno, internet, commissioni OTA, ecc.).
+- **Rilevamento duplicati automatico**: durante l'importazione dell'estratto conto, le transazioni già presenti nel database (stessa data e importo) vengono deselezionate automaticamente.
+- **Analisi estratto conto**: anteprima del file, selezione guidata delle colonne (data, descrizione, importo singolo o due colonne entrate/uscite), riepilogo entrate/uscite/saldo, saldo iniziale/finale con verifica di quadratura, totali per voce e grafici (suddivisione spese e dettaglio utenze).
+- **Modifica e validazione pre-importazione**: tabella editabile per modificare categorie, metodi di pagamento, descrizioni o deselezionare righe prima del salvataggio.
+- **Dipendenza `openpyxl`**: aggiunta a `requirements.txt` per la lettura dei file Excel.
+- **Gestione ambiente dev**: nuova funzione `carica_secrets_ambiente()` che legge le credenziali da `dev_secrets.toml` quando `APP_ENV=dev`, con fallback a `.streamlit/secrets.toml` o `.env`.
+- **Avvio locale migliorato**: `run_local.py` ora forza l'encoding UTF-8 su Windows, imposta l'ambiente dev, apre automaticamente il browser su `http://localhost:8501` e usa la porta 8501 esplicita.
+- **`avvia_app.bat` semplificato**: ora delega a `run_local.py` (gestione encoding, dipendenze e credenziali).
+
+### Modificato
+- **Navigazione**: aggiunta la voce "Guida" nella barra laterale.
+- **`.gitignore`**: sostituita la voce `demo_secrets.toml` con `dev_secrets.toml`.
+- **Rimozione file demo**: eliminati `DEMO_README.md`, `demo_setup.sql` e `seed_demo.py` (non più necessari).
+
 ## [2.4.0] — 2026-07-31
+
 
 ### Aggiunto
 - **Backup & Ripristino**: nuova pagina dedicata per creare backup manuali completi dei dati (transazioni, categorie e scadenze) in file JSON scaricabili.

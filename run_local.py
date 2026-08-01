@@ -16,10 +16,27 @@ import sys
 import importlib.util
 from pathlib import Path
 
+# Forza l'encoding UTF-8 per la console Windows (evita errori con emoji e caratteri accentati)
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 BASE_DIR = Path(__file__).resolve().parent
 APP_PATH = BASE_DIR / "contabilità_francesco" / "app.py"
 ENV_PATH = BASE_DIR / ".env"
 SECRETS_PATH = BASE_DIR / ".streamlit" / "secrets.toml"
+DEV_SECRETS_PATH = BASE_DIR / "dev_secrets.toml"
+
+# Ambiente: dev (dati reali)
+APP_ENV = "dev"
+os.environ["APP_ENV"] = APP_ENV
 
 REQUIRED_PACKAGES = ["streamlit", "supabase", "python-dotenv", "pandas", "httpx", "python-dateutil"]
 
@@ -41,6 +58,8 @@ def install_dependencies(pacchetti):
 
 def check_credentials():
     """Verifica la presenza delle credenziali Supabase."""
+    if DEV_SECRETS_PATH.exists():
+        return True, "dev_secrets.toml"
     if ENV_PATH.exists():
         return True, "env"
     if SECRETS_PATH.exists():
@@ -114,8 +133,19 @@ def main():
         sys.executable, "-m", "streamlit", "run",
         str(APP_PATH),
         "--server.headless", "true",
+        "--server.port", "8501",
     ]
     try:
+        # Apri il browser automaticamente dopo un breve ritardo
+        import threading
+        import webbrowser
+        import time
+        
+        def apri_browser():
+            time.sleep(2)
+            webbrowser.open("http://localhost:8501")
+        
+        threading.Thread(target=apri_browser, daemon=True).start()
         subprocess.run(cmd, cwd=str(BASE_DIR))
     except KeyboardInterrupt:
         print("\n👋 App fermata.")

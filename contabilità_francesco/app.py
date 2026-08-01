@@ -12,6 +12,8 @@ from payment_methods import METODI_PAGAMENTO, normalizza_metodo_pagamento
 
 load_dotenv()
 
+import tomllib
+
 def get_secret(key):
     """Legge un segreto da st.secrets senza sollevare errori se il file non esiste."""
     try:
@@ -19,8 +21,36 @@ def get_secret(key):
     except Exception:
         return None
 
-SUPABASE_URL = get_secret("SUPABASE_URL") or os.getenv("SUPABASE_URL")
-SUPABASE_KEY = get_secret("SUPABASE_KEY") or os.getenv("SUPABASE_KEY")
+def carica_secrets_ambiente():
+    """
+    Carica le credenziali in base all'ambiente.
+    - APP_ENV=dev  -> usa dev_secrets.toml (dati reali)
+    - default      -> usa .streamlit/secrets.toml (se presente) oppure .env
+    """
+    ambiente = os.getenv("APP_ENV", "").strip().lower()
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    if ambiente == "dev":
+        percorso = os.path.join(os.path.dirname(base_dir), "dev_secrets.toml")
+        if os.path.exists(percorso):
+            with open(percorso, "rb") as f:
+                return tomllib.load(f)
+    
+    # Fallback: usa st.secrets (da .streamlit/secrets.toml) o .env
+    return {}
+
+secrets_ambiente = carica_secrets_ambiente()
+
+SUPABASE_URL = (
+    secrets_ambiente.get("SUPABASE_URL")
+    or get_secret("SUPABASE_URL")
+    or os.getenv("SUPABASE_URL")
+)
+SUPABASE_KEY = (
+    secrets_ambiente.get("SUPABASE_KEY")
+    or get_secret("SUPABASE_KEY")
+    or os.getenv("SUPABASE_KEY")
+)
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Credenziali Supabase non trovate! Crea un file .env o configura i secrets.")
@@ -90,6 +120,15 @@ def scarica_ricevuta(nome_file):
 
 # ─── LOGIN (automatico: legge tutti i LOGIN_USERNAME* dai secrets) ──
 UTENTI = {}
+# Prima carica dai secrets dell'ambiente (dev_secrets.toml)
+for key, value in secrets_ambiente.items():
+    if key.startswith("LOGIN_USERNAME"):
+        suffix = key.replace("LOGIN_USERNAME", "")
+        password_key = f"LOGIN_PASSWORD{suffix}"
+        password = secrets_ambiente.get(password_key, "")
+        if value and password:
+            UTENTI[value] = password
+# Poi integra con st.secrets (da .streamlit/secrets.toml)
 try:
     for key, value in st.secrets.items():
         if key.startswith("LOGIN_USERNAME"):
@@ -152,11 +191,12 @@ with st.sidebar:
     
     pagina = st.radio(
         "Navigazione",
-        ["Nuova registrazione", "Prenotazioni & Ospiti", "Scadenzario & Promemoria", "Resoconto & analisi", "Archivio ricevute", "Archivio pagamenti", "Gestione categorie", "Backup & Ripristino"],
-        captions=["Aggiungi un movimento", "Gestisci prenotazioni e ospiti", "Gestisci scadenze e promemoria", "Vedi entrate/uscite/grafici", "Visualizza e cerca ricevute", "Storico completo pagamenti", "Modifica le voci contabili", "Salva e ripristina i dati"],
+        ["Nuova registrazione", "Carica Estratto Conto", "Prenotazioni & Ospiti", "Scadenzario & Promemoria", "Resoconto & analisi", "Archivio ricevute", "Archivio pagamenti", "Gestione categorie", "Backup & Ripristino", "Guida"],
+        captions=["Aggiungi un movimento", "Analizza ed importa da Excel", "Gestisci prenotazioni e ospiti", "Gestisci scadenze e promemoria", "Vedi entrate/uscite/grafici", "Visualizza e cerca ricevute", "Storico completo pagamenti", "Modifica le voci contabili", "Salva e ripristina i dati", "Manuale d'uso dell'app"],
         label_visibility="collapsed",
         key="nav"
     )
+
     
     st.space("large")
     if st.button(":material/logout: Esci", use_container_width=True):
@@ -169,9 +209,12 @@ with st.sidebar:
 def init_db():
     anno_corrente = datetime.now().year
     categorie_iniziali = [
+        ('Entrata', 'Accredito'),
         ('Entrata', 'Fatturato / Vendite'),
         ('Entrata', 'Prestazione Servizi'),
         ('Entrata', 'Altro (Entrata)'),
+        ('Uscita', 'Addebito'),
+        ('Uscita', 'Cassa'),
         ('Uscita', 'Affitto'),
         ('Uscita', 'Stipendi'),
         ('Uscita', 'Bollette luce gas appartamenti'),
@@ -440,6 +483,55 @@ def calcola_prossima_data(data_scadenza_input, ricorrenza):
         nuova_data = data_base
 
     return nuova_data.strftime("%Y-%m-%d")
+
+def auto_categorizza(descrizione, tipo):
+    """Categorizza automaticamente una transazione in base alla descrizione e al tipo (Entrata/Uscita).
+    Le macro aree sono suddivise per tipo di provenienza: accredito (Entrata) / addebito (Uscita).
+    Se la descrizione contiene 'cassa', la transazione viene assegnata alla macro area 'Cassa'."""
+    desc_lower = descrizione.lower() if descrizione else ""
+    
+    # Macro area: Cassa (precedenza assoluta)
+    if "cassa" in desc_lower:
+        return "Cassa"
+    
+    if tipo == 'Entrata':
+        # Macro area: Accredito
+        if any(kw in desc_lower for kw in ["accredito", "accrediti", "versamento", "deposito", "bonifico da", "bonif da", "vostro bonifico", "ricavo", "incasso", "fattura", "vendita", "ospite", "booking", "airbnb", "prestazione"]):
+            return "Accredito"
+        if any(kw in desc_lower for kw in ["serviz", "consulen", "prestazion"]):
+            return "Prestazione Servizi"
+        return "Altro (Entrata)"
+    else: # Uscita
+        # Macro area: Addebito
+        if any(kw in desc_lower for kw in ["addebito", "addebiti", "pagamento", "pagamenti", "prelievo", "prelevamento", "prel", "bonifico", "bonif", "utilizzo carta", "carta di credito", "pag maestro", "maestro", "imposta bollo", "imposte", "tasse", "pagamenti diversi", "rimborso"]):
+            return "Addebito"
+        if any(kw in desc_lower for kw in ["affitto", "locazione", "canone"]):
+            return "Affitto"
+        if any(kw in desc_lower for kw in ["stipendio", "retribuzione", "busta paga", "dipendente"]):
+            return "Stipendi"
+        if any(kw in desc_lower for kw in ["luce", "gas", "enel", "eni", "energia", "servizio elettrico", "acqua", "bolletta", "acsm", "a2a"]):
+            return "Bollette luce gas appartamenti"
+        if any(kw in desc_lower for kw in ["ufficio", "cancelleria", "cartoleria"]):
+            return "ufficio"
+        if any(kw in desc_lower for kw in ["casa", "spesa casa", "supermercato"]):
+            return "casa"
+        if "f24" in desc_lower or "tributo" in desc_lower or "agenzia entrate" in desc_lower:
+            # Associa all'anno corretto
+            for anno in [2025, 2026, 2027, 2028, 2029]:
+                if str(anno) in desc_lower:
+                    return f"f24 : rateizzazione tasse {anno}"
+            return f"f24 : rateizzazione tasse {datetime.now().year}"
+        if any(kw in desc_lower for kw in ["tassa soggiorno", "tassa di soggiorno", "soggiorno"]):
+            return "Tasse di soggiorno"
+        if any(kw in desc_lower for kw in ["internet", "fastweb", "vodafone", "wind", "telecom", "fibra", "tiscali"]):
+            return "Internet"
+        if any(kw in desc_lower for kw in ["booking", "idealista", "segreteria.it", "immobiliare", "airbnb"]):
+            return "Booking - idealista - segreteria.it - immobiliare.it"
+        if any(kw in desc_lower for kw in ["pulizia", "nolmar", "igiene", "verona lux", "albanese", "impresa puliz", "tutto igiene"]):
+            return "pulizia nolmar / tutto igiene / Verona lux / Albanese group"
+        if any(kw in desc_lower for kw in ["commercialista", "tempora", "consulenza contabile"]):
+            return "Commercialista a tempora"
+        return "Altro (Uscita)"
 
 def ottieni_scadenze(stato=None):
     try:
@@ -778,6 +870,433 @@ if pagina == "Nuova registrazione":
                 st.success(f"✅ Registrato: {tipo_movimento} {importo_movimento:.2f} EUR ({metodo_pagamento})")
                 st.balloons()
                 st.rerun()
+
+# ─── PAGINA: CARICA ESTRATTO CONTO ─────────────────────────
+elif pagina == "Carica Estratto Conto":
+    st.markdown("### :material/upload_file: Carica & Analizza Estratto Conto")
+    st.caption("Carica il tuo estratto conto bancario in formato **Excel (.xlsx, .xls)** o **CSV (.csv)** per analizzare, categorizzare automaticamente e importare le transazioni nel database.")
+    st.caption("💡 **Nota:** Se hai un file PDF, esportalo come Excel o CSV dal tuo home banking, oppure usa la pagina *Nuova registrazione* per inserire manualmente le transazioni.")
+
+    file_caricato = st.file_uploader("Seleziona il file dell'estratto conto", type=["xlsx", "xls", "csv"])
+    if file_caricato is not None:
+        try:
+            nome_file = file_caricato.name.lower()
+            estensione = nome_file.split('.')[-1] if '.' in nome_file else ''
+            
+            if estensione == 'csv':
+                # Leggi file CSV con rilevamento automatico del separatore
+                import csv as csv_module
+                contenuto = file_caricato.getvalue().decode('utf-8', errors='replace')
+                # Rileva il separatore (virgola, punto e virgola, tab)
+                try:
+                    dialetto = csv_module.Sniffer().sniff(contenuto[:2048], delimiters=',;\t')
+                    separatore = dialetto.delimiter
+                except Exception:
+                    separatore = ';'  # Default per file italiani
+                
+                df_excel = pd.read_csv(io.BytesIO(file_caricato.getvalue()), sep=separatore, encoding='utf-8', on_bad_lines='skip')
+                foglio_selezionato = "CSV"
+            else:
+                # Leggi file Excel
+                excel_file = pd.ExcelFile(file_caricato)
+                nomi_fogli = excel_file.sheet_names
+                
+                # Seleziona foglio se ce n'è più di uno
+                if len(nomi_fogli) > 1:
+                    foglio_selezionato = st.selectbox("Seleziona il foglio di lavoro:", nomi_fogli)
+                else:
+                    foglio_selezionato = nomi_fogli[0]
+                
+                # Leggi il file
+                df_excel = pd.read_excel(file_caricato, sheet_name=foglio_selezionato)
+            
+            st.markdown("#### :material/preview: Anteprima del file caricato")
+            st.caption("Ecco le prime 10 righe del file. Seleziona le colonne corrispondenti qui sotto.")
+            st.dataframe(df_excel.head(10), width='stretch')
+            
+            # Configurazione colonne
+            col_sc1, col_sc2, col_sc3 = st.columns(3)
+            colonne_disponibili = [""] + list(df_excel.columns)
+            
+            # Ricerca automatica colonne comuni
+            def trova_colonna(nomi_possibili, colonne, escludi=None):
+                """Trova la prima colonna che contiene uno dei nomi possibili, escludendo quelle in 'escludi'."""
+                for col in colonne:
+                    col_lower = str(col).lower()
+                    if escludi and any(e in col_lower for e in escludi):
+                        continue
+                    if any(p in col_lower for p in nomi_possibili):
+                        return col
+                return ""
+            
+            # Cerca la colonna data (escludendo "data valuta" che è diversa da "data contabile")
+            col_data_prev = trova_colonna(["data contabile", "data operazione", "data"], df_excel.columns, escludi=["valuta"])
+            if not col_data_prev:
+                col_data_prev = trova_colonna(["data", "date"], df_excel.columns)
+            
+            # Cerca la colonna descrizione (escludendo "data" e "valuta")
+            col_desc_prev = trova_colonna(
+                ["operazione", "descrizione", "causale", "desc", "dettaglio", "movimento", "beneficiario", "note"],
+                df_excel.columns,
+                escludi=["data", "valuta", "caus. abi", "abi"]
+            )
+            
+            # Cerca la colonna importo singolo (se presente)
+            col_imp_prev = trova_colonna(
+                ["importo", "valore", "ammontare", "quantità", "euro", "eur", "cifra", "dare", "avere"],
+                df_excel.columns,
+                escludi=["uscita", "entrata"]
+            )
+            
+            # Cerca colonne separate per entrate e uscite
+            col_imp_ent_prev = trova_colonna(["entrata", "entrate", "avere", "accredito", "accrediti"], df_excel.columns)
+            col_imp_usc_prev = trova_colonna(["uscita", "uscite", "dare", "spesa", "spese", "addebito", "addebiti"], df_excel.columns)
+            
+            # Se ci sono sia colonne entrata che uscita, usa il formato a due colonne
+            if col_imp_ent_prev and col_imp_usc_prev:
+                tipo_importo_default = "Due colonne separate (Entrate e Uscite)"
+            else:
+                tipo_importo_default = "Colonna singola (segno +/-)"
+            
+            with col_sc1:
+                col_data = st.selectbox("Colonna Data:", colonne_disponibili, index=colonne_disponibili.index(col_data_prev) if col_data_prev in colonne_disponibili else 0)
+            with col_sc2:
+                col_desc = st.selectbox("Colonna Descrizione:", colonne_disponibili, index=colonne_disponibili.index(col_desc_prev) if col_desc_prev in colonne_disponibili else 0)
+            with col_sc3:
+                tipo_importo = st.radio("Struttura importo:", ["Colonna singola (segno +/-)", "Due colonne separate (Entrate e Uscite)"], horizontal=True)
+                
+            col_sc4, col_sc5 = st.columns(2)
+            if tipo_importo == "Colonna singola (segno +/-)":
+                with col_sc4:
+                    col_importo = st.selectbox("Colonna Importo:", colonne_disponibili, index=colonne_disponibili.index(col_imp_prev) if col_imp_prev in colonne_disponibili else 0)
+                col_importo_entrata = ""
+                col_importo_uscita = ""
+            else:
+                col_imp_ent_prev = trova_colonna(["entrata", "entrate", "avere", "accredito", "accrediti"], df_excel.columns)
+                col_imp_usc_prev = trova_colonna(["uscita", "uscite", "dare", "spesa", "spese", "addebito", "addebiti"], df_excel.columns)
+                with col_sc4:
+                    col_importo_entrata = st.selectbox("Colonna Entrate:", colonne_disponibili, index=colonne_disponibili.index(col_imp_ent_prev) if col_imp_ent_prev in colonne_disponibili else 0)
+                with col_sc5:
+                    col_importo_uscita = st.selectbox("Colonna Uscite:", colonne_disponibili, index=colonne_disponibili.index(col_imp_usc_prev) if col_imp_usc_prev in colonne_disponibili else 0)
+                col_importo = ""
+                
+            col_met_def, col_pers_def = st.columns(2)
+            with col_met_def:
+                metodo_predefinito = st.selectbox("Metodo di pagamento predefinito:", METODI_PAGAMENTO, index=METODI_PAGAMENTO.index("Bonifico") if "Bonifico" in METODI_PAGAMENTO else 0)
+            with col_pers_def:
+                persona_predefinita = st.text_input("Persona / Ente predefinito (opzionale):", placeholder="Es. Banca, Fornitore...")
+                
+            # Verifica mappatura minima
+            mappatura_ok = False
+            if col_data and col_desc:
+                if tipo_importo == "Colonna singola (segno +/-)" and col_importo:
+                    mappatura_ok = True
+                elif tipo_importo == "Due colonne separate (Entrate e Uscite)" and col_importo_entrata and col_importo_uscita:
+                    mappatura_ok = True
+                    
+            if not mappatura_ok:
+                st.warning("⚠️ Seleziona le colonne corrette per procedere con l'analisi.")
+            else:
+                # Elaborazione dati
+                transazioni_elaborate = []
+                
+                for idx, row in df_excel.iterrows():
+                    # Salta righe dove data o descrizione sono nulle
+                    val_data = row[col_data]
+                    val_desc = row[col_desc]
+                    if pd.isna(val_data) or pd.isna(val_desc):
+                        continue
+                        
+                    # Conversione data
+                    try:
+                        if isinstance(val_data, datetime):
+                            data_parsed = val_data.date()
+                        elif isinstance(val_data, date):
+                            data_parsed = val_data
+                        else:
+                            data_parsed = pd.to_datetime(val_data).date()
+                    except Exception:
+                        continue # Salta righe con data non valida
+                        
+                    # Determinazione importo e tipo
+                    importo_val = 0.0
+                    tipo_val = "Uscita"
+                    
+                    if tipo_importo == "Colonna singola (segno +/-)":
+                        val_imp = row[col_importo]
+                        if pd.isna(val_imp):
+                            continue
+                        try:
+                            # Gestione se stringa o float
+                            if isinstance(val_imp, str):
+                                # Rimuove punti usati come migliaia, sostituisce virgola decimale con punto
+                                val_imp_cleaned = val_imp.strip().replace('.', '').replace(',', '.')
+                                importo_val = float(val_imp_cleaned)
+                            else:
+                                importo_val = float(val_imp)
+                        except Exception:
+                            continue
+                        
+                        if importo_val == 0:
+                            continue
+                            
+                        if importo_val > 0:
+                            tipo_val = "Entrata"
+                        else:
+                            tipo_val = "Uscita"
+                            importo_val = abs(importo_val)
+                    else:
+                        val_ent = row[col_importo_entrata]
+                        val_usc = row[col_importo_uscita]
+                        
+                        ent_valida = False
+                        usc_valida = False
+                        
+                        try:
+                            if not pd.isna(val_ent) and str(val_ent).strip() != "":
+                                f_ent = float(str(val_ent).replace('.', '').replace(',', '.')) if isinstance(val_ent, str) else float(val_ent)
+                                if f_ent != 0:
+                                    ent_valida = True
+                                    importo_val = abs(f_ent)
+                        except Exception:
+                            pass
+                            
+                        try:
+                            if not ent_valida and not pd.isna(val_usc) and str(val_usc).strip() != "":
+                                f_usc = float(str(val_usc).replace('.', '').replace(',', '.')) if isinstance(val_usc, str) else float(val_usc)
+                                if f_usc != 0:
+                                    usc_valida = True
+                                    importo_val = abs(f_usc)
+                        except Exception:
+                            pass
+                            
+                        if ent_valida:
+                            tipo_val = "Entrata"
+                        elif usc_valida:
+                            tipo_val = "Uscita"
+                        else:
+                            continue # Nessun importo valido
+                            
+                    # Categorizzazione automatica
+                    desc_str = str(val_desc).strip()
+                    voce_automatica = auto_categorizza(desc_str, tipo_val)
+                    
+                    transazioni_elaborate.append({
+                        "Importa": True,
+                        "Data": data_parsed,
+                        "Tipo": tipo_val,
+                        "Voce": voce_automatica,
+                        "Importo": importo_val,
+                        "Metodo": metodo_predefinito,
+                        "Persona": persona_predefinita if persona_predefinita else "",
+                        "Descrizione": desc_str
+                    })
+                
+                if not transazioni_elaborate:
+                    st.error("Nessuna riga valida trovata nel file Excel con i criteri selezionati.")
+                else:
+                    df_elaborato = pd.DataFrame(transazioni_elaborate)
+                    
+                    # Rilevamento duplicati automatico
+                    st.markdown("#### :material/analytics: Analisi e Categorizzazione Automatica")
+                    
+                    # Recupera transazioni esistenti per il range di date per trovare duplicati
+                    min_date = df_elaborato['Data'].min()
+                    max_date = df_elaborato['Data'].max()
+                    try:
+                        df_esistenti = ottieni_transazioni(min_date.strftime("%Y-%m-%d"), max_date.strftime("%Y-%m-%d"))
+                    except Exception:
+                        df_esistenti = pd.DataFrame()
+                        
+                    if not df_esistenti.empty:
+                        # Converti date a stringa per confronto coerente
+                        df_esistenti['data_str'] = df_esistenti['data'].astype(str)
+                        df_elaborato['data_str'] = df_elaborato['Data'].astype(str)
+                        
+                        possibili_duplicati = 0
+                        for idx_el, row_el in df_elaborato.iterrows():
+                            # Cerca righe esistenti con stessa data e importo
+                            match = df_esistenti[
+                                (df_esistenti['data_str'] == row_el['data_str']) & 
+                                (df_esistenti['importo'].round(2) == round(row_el['Importo'], 2))
+                            ]
+                            if not match.empty:
+                                df_elaborato.at[idx_el, 'Importa'] = False
+                                possibili_duplicati += 1
+                                
+                        if possibili_duplicati > 0:
+                            st.warning(f"⚠️ Rilevati {possibili_duplicati} possibili duplicati già presenti nel database! Queste righe sono state deselezionate automaticamente nella tabella sottostante.")
+                        
+                        df_elaborato.drop(columns=['data_str'], inplace=True)
+                    
+                    # Mostra Riepilogo dell'Estratto Conto prima dell'importazione
+                    df_filtrato_importa = df_elaborato[df_elaborato['Importa'] == True]
+                    
+                    tot_ent = df_filtrato_importa[df_filtrato_importa['Tipo'] == 'Entrata']['Importo'].sum()
+                    tot_usc = df_filtrato_importa[df_filtrato_importa['Tipo'] == 'Uscita']['Importo'].sum()
+                    
+                    st.markdown("##### :material/dashboard: Resoconto dell'Estratto Conto (Selezionati per l'importazione)")
+                    col_rep1, col_rep2, col_rep3 = st.columns(3)
+                    with col_rep1:
+                        st.metric("Totale Entrate", f"{tot_ent:,.2f} EUR")
+                    with col_rep2:
+                        st.metric("Totale Uscite", f"{tot_usc:,.2f} EUR")
+                    with col_rep3:
+                        st.metric("Saldo Netto", f"{tot_ent - tot_usc:,.2f} EUR")
+                    
+                    # Saldo iniziale e finale
+                    st.markdown("##### :material/account_balance: Saldo iniziale e finale")
+                    col_saldo1, col_saldo2, col_saldo3 = st.columns(3)
+                    with col_saldo1:
+                        saldo_iniziale = st.number_input(
+                            "Saldo iniziale (EUR)",
+                            min_value=0.0,
+                            value=0.0,
+                            step=100.00,
+                            format="%.2f",
+                            help="Inserisci il saldo del conto all'inizio del periodo dell'estratto conto.",
+                            key="saldo_iniziale_ec"
+                        )
+                    with col_saldo2:
+                        saldo_finale = st.number_input(
+                            "Saldo finale (EUR)",
+                            min_value=0.0,
+                            value=0.0,
+                            step=100.00,
+                            format="%.2f",
+                            help="Inserisci il saldo del conto alla fine del periodo dell'estratto conto.",
+                            key="saldo_finale_ec"
+                        )
+                    with col_saldo3:
+                        saldo_calcolato = saldo_iniziale + tot_ent - tot_usc
+                        st.metric(
+                            "Saldo calcolato",
+                            f"{saldo_calcolato:,.2f} EUR",
+                            delta=f"{saldo_finale - saldo_calcolato:,.2f} EUR",
+                            delta_color="normal" if abs(saldo_finale - saldo_calcolato) < 0.01 else "inverse",
+                            help="Saldo iniziale + entrate - uscite. Confrontalo con il saldo finale dichiarato dalla banca."
+                        )
+                        if abs(saldo_finale - saldo_calcolato) >= 0.01 and saldo_finale > 0:
+                            st.warning(f"⚠️ Differenza di {abs(saldo_finale - saldo_calcolato):,.2f} EUR tra il saldo calcolato e quello dichiarato. Verifica che tutte le transazioni siano state incluse.")
+                    
+                    # Totali per singola voce (dettaglio completo)
+                    st.markdown("##### :material/table_chart: Totali per singola voce")
+                    df_tot_voci = df_filtrato_importa.groupby(['Tipo', 'Voce'])['Importo'].sum().reset_index()
+                    df_tot_voci.columns = ['Tipo', 'Voce', 'Totale (EUR)']
+                    df_tot_voci = df_tot_voci.sort_values(['Tipo', 'Totale (EUR)'], ascending=[True, False])
+                    
+                    col_tv1, col_tv2 = st.columns(2)
+                    with col_tv1:
+                        with st.container(border=True):
+                            st.markdown("**:material/trending_up: Entrate per voce**")
+                            df_tot_ent_voci = df_tot_voci[df_tot_voci['Tipo'] == 'Entrata']
+                            if not df_tot_ent_voci.empty:
+                                st.dataframe(
+                                    df_tot_ent_voci[['Voce', 'Totale (EUR)']].style.format({'Totale (EUR)': '{:,.2f}'}),
+                                    hide_index=True,
+                                    width='stretch'
+                                )
+                            else:
+                                st.info("Nessuna entrata selezionata.")
+                    with col_tv2:
+                        with st.container(border=True):
+                            st.markdown("**:material/trending_down: Uscite per voce**")
+                            df_tot_usc_voci = df_tot_voci[df_tot_voci['Tipo'] == 'Uscita']
+                            if not df_tot_usc_voci.empty:
+                                st.dataframe(
+                                    df_tot_usc_voci[['Voce', 'Totale (EUR)']].style.format({'Totale (EUR)': '{:,.2f}'}),
+                                    hide_index=True,
+                                    width='stretch'
+                                )
+                            else:
+                                st.info("Nessuna uscita selezionata.")
+                    
+                    # Grafici e Breakdown per Categoria/Utenze
+                    col_gr1, col_gr2 = st.columns(2)
+                    with col_gr1:
+                        st.markdown("**Suddivisione Spese per Tipologia/Categoria**")
+                        df_spese = df_filtrato_importa[df_filtrato_importa['Tipo'] == 'Uscita']
+                        if not df_spese.empty:
+                            spese_raggruppate = df_spese.groupby('Voce')['Importo'].sum().reset_index()
+                            st.bar_chart(data=spese_raggruppate, x='Voce', y='Importo', use_container_width=True)
+                        else:
+                            st.info("Nessuna spesa selezionata.")
+                            
+                    with col_gr2:
+                        st.markdown("**Dettaglio Utenze (Bollette luce, gas, internet ecc.)**")
+                        df_utenze = df_filtrato_importa[
+                            (df_filtrato_importa['Tipo'] == 'Uscita') & 
+                            (df_filtrato_importa['Voce'].isin(['Bollette luce gas appartamenti', 'Internet']))
+                        ]
+                        if not df_utenze.empty:
+                            utenze_raggruppate = df_utenze.groupby('Voce')['Importo'].sum().reset_index()
+                            st.bar_chart(data=utenze_raggruppate, x='Voce', y='Importo', use_container_width=True)
+                            
+                            # Tabella dettaglio utenze
+                            st.dataframe(df_utenze[['Data', 'Voce', 'Importo', 'Descrizione']], hide_index=True)
+                        else:
+                            st.info("Nessuna utenza o bolletta rilevata tra le transazioni selezionate.")
+                    
+                    st.markdown("#### :material/edit: Modifica e Valida le Transazioni prima del Salvataggio")
+                    st.caption("Puoi modificare le categorie, i metodi di pagamento, la descrizione o deselezionare le righe che non desideri importare.")
+                    
+                    # Prepariamo la lista di tutte le categorie possibili per la selezione in data_editor
+                    tutte_categorie_db = list(set(ottieni_categorie('Entrata') + ottieni_categorie('Uscita')))
+                    if not tutte_categorie_db:
+                        tutte_categorie_db = ['Accredito', 'Fatturato / Vendite', 'Prestazione Servizi', 'Altro (Entrata)', 'Addebito', 'Cassa', 'Affitto', 'Stipendi', 'Bollette luce gas appartamenti', 'Internet', 'Tasse di soggiorno', 'Altro (Uscita)']
+                    
+                    edited_df = st.data_editor(
+                        df_elaborato,
+                        column_config={
+                            "Importa": st.column_config.CheckboxColumn("Importa?", default=True),
+                            "Data": st.column_config.DateColumn("Data", disabled=True),
+                            "Tipo": st.column_config.SelectboxColumn("Tipo", options=["Entrata", "Uscita"]),
+                            "Voce": st.column_config.SelectboxColumn("Voce (Categoria)", options=tutte_categorie_db),
+                            "Importo": st.column_config.NumberColumn("Importo (EUR)", format="%.2f"),
+                            "Metodo": st.column_config.SelectboxColumn("Metodo", options=METODI_PAGAMENTO),
+                            "Persona": st.column_config.TextColumn("Persona / Fornitore"),
+                            "Descrizione": st.column_config.TextColumn("Descrizione / Causale", width="large")
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                        key="editor_estratto_conto"
+                    )
+                    
+                    # Bottone di salvataggio
+                    if st.button("🚀 Importa Transazioni Selezionate nel Database", type="primary", use_container_width=True):
+                        df_da_importare = edited_df[edited_df['Importa'] == True]
+                        if df_da_importare.empty:
+                            st.warning("Nessuna transazione selezionata per l'importazione.")
+                        else:
+                            success_count = 0
+                            progress_text = "Salvataggio nel database in corso..."
+                            my_bar = st.progress(0, text=progress_text)
+                            
+                            tot_righe = len(df_da_importare)
+                            for i, (_, row_imp) in enumerate(df_da_importare.iterrows()):
+                                # Esegui inserimento
+                                data_str = row_imp['Data'].strftime("%Y-%m-%d") if isinstance(row_imp['Data'], (date, datetime)) else str(row_imp['Data'])
+                                ok = aggiungi_transazione(
+                                    data_str,
+                                    row_imp['Tipo'],
+                                    row_imp['Voce'],
+                                    float(row_imp['Importo']),
+                                    row_imp['Metodo'],
+                                    row_imp['Persona'],
+                                    row_imp['Descrizione'],
+                                    None # Nessun file ricevuta
+                                )
+                                if ok:
+                                    success_count += 1
+                                my_bar.progress((i + 1) / tot_righe, text=f"Importati {i+1}/{tot_righe} movimenti...")
+                                
+                            my_bar.empty()
+                            st.success(f"✅ Importazione completata! {success_count} su {tot_righe} transazioni sono state caricate con successo nel database.")
+                            st.balloons()
+                            # Reset file uploader / rerun per aggiornare l'applicazione
+                            st.button("Pulisci ed esegui un nuovo caricamento", on_click=lambda: st.rerun())
+        except Exception as e:
+            st.error(f"Errore durante la lettura del file Excel: {str(e)}")
 
 # ─── PAGINA: PRENOTAZIONI & OSPITI ─────────────────────────
 elif pagina == "Prenotazioni & Ospiti":
@@ -1408,64 +1927,69 @@ elif pagina == "Archivio ricevute":
     
     # Ottieni tutte le transazioni che hanno una ricevuta
     df_tutte = ottieni_transazioni()
-    df_con_ricevute = df_tutte[df_tutte['ricevuta_nome'].notna() & (df_tutte['ricevuta_nome'] != '')].copy()
     
-    if df_con_ricevute.empty:
+    # Verifica se la colonna ricevuta_nome esiste (potrebbe mancare nel DB reale)
+    if 'ricevuta_nome' not in df_tutte.columns:
         st.info(":material/info: Nessuna ricevuta caricata. Vai in *Nuova registrazione* per caricare una ricevuta.")
     else:
-        # Filtri
-        col_filtri_r1, col_filtri_r2, col_filtri_r3 = st.columns(3)
-        with col_filtri_r1:
-            filtro_tipo_r = st.selectbox("Filtra per tipo", ["Tutti", "Entrata", "Uscita"], key="filtro_tipo_ricevuta")
-        with col_filtri_r2:
-            # Estrai anni disponibili
-            df_con_ricevute['anno'] = pd.to_datetime(df_con_ricevute['data']).dt.year
-            anni_disponibili = sorted(df_con_ricevute['anno'].unique(), reverse=True)
-            filtro_anno_r = st.selectbox("Filtra per anno", ["Tutti"] + [str(a) for a in anni_disponibili], key="filtro_anno_ricevuta")
-        with col_filtri_r3:
-            # Cerca per descrizione
-            filtro_testo_r = st.text_input(":material/search: Cerca per descrizione", placeholder="Testo...", key="filtro_testo_ricevuta")
+        df_con_ricevute = df_tutte[df_tutte['ricevuta_nome'].notna() & (df_tutte['ricevuta_nome'] != '')].copy()
         
-        # Applica filtri
-        df_filtrate = df_con_ricevute.copy()
-        if filtro_tipo_r != "Tutti":
-            df_filtrate = df_filtrate[df_filtrate['tipo'] == filtro_tipo_r]
-        if filtro_anno_r != "Tutti":
-            df_filtrate = df_filtrate[df_filtrate['anno'] == int(filtro_anno_r)]
-        if filtro_testo_r:
-            df_filtrate = df_filtrate[df_filtrate['descrizione'].str.contains(filtro_testo_r, case=False, na=False)]
-        
-        st.markdown(f"**{len(df_filtrate)} ricevute trovate**")
-        
-        # Mostra ricevute in griglia
-        cols_per_row = 3
-        for i in range(0, len(df_filtrate), cols_per_row):
-            cols = st.columns(cols_per_row)
-            for j, (idx, row) in enumerate(df_filtrate.iloc[i:i+cols_per_row].iterrows()):
-                with cols[j]:
-                    with st.container(border=True):
-                        st.markdown(f"**{row['ricevuta_nome']}**")
-                        st.caption(f"{row['data']} | {row['tipo']} | {row['voce']}")
-                        if row['descrizione']:
-                            st.caption(f"📝 {row['descrizione']}")
-                        if row.get('importo'):
-                            st.markdown(f"**{row['importo']:.2f} EUR**")
-                        
-                        # Mostra anteprima e download
-                        dati_ricevuta = scarica_ricevuta(row['ricevuta_percorso'])
-                        if dati_ricevuta:
-                            ext = os.path.splitext(row['ricevuta_nome'])[1].lower()
-                            if ext in ['.png', '.jpg', '.jpeg']:
-                                st.image(dati_ricevuta, width=250)
-                            st.download_button(
-                                ":material/download: Scarica",
-                                data=dati_ricevuta,
-                                file_name=row['ricevuta_nome'],
-                                key=f"dl_ricevuta_{row['id']}",
-                                use_container_width=True
-                            )
-                        else:
-                            st.warning("File non disponibile")
+        if df_con_ricevute.empty:
+            st.info(":material/info: Nessuna ricevuta caricata. Vai in *Nuova registrazione* per caricare una ricevuta.")
+        else:
+            # Filtri
+            col_filtri_r1, col_filtri_r2, col_filtri_r3 = st.columns(3)
+            with col_filtri_r1:
+                filtro_tipo_r = st.selectbox("Filtra per tipo", ["Tutti", "Entrata", "Uscita"], key="filtro_tipo_ricevuta")
+            with col_filtri_r2:
+                # Estrai anni disponibili
+                df_con_ricevute['anno'] = pd.to_datetime(df_con_ricevute['data']).dt.year
+                anni_disponibili = sorted(df_con_ricevute['anno'].unique(), reverse=True)
+                filtro_anno_r = st.selectbox("Filtra per anno", ["Tutti"] + [str(a) for a in anni_disponibili], key="filtro_anno_ricevuta")
+            with col_filtri_r3:
+                # Cerca per descrizione
+                filtro_testo_r = st.text_input(":material/search: Cerca per descrizione", placeholder="Testo...", key="filtro_testo_ricevuta")
+            
+            # Applica filtri
+            df_filtrate = df_con_ricevute.copy()
+            if filtro_tipo_r != "Tutti":
+                df_filtrate = df_filtrate[df_filtrate['tipo'] == filtro_tipo_r]
+            if filtro_anno_r != "Tutti":
+                df_filtrate = df_filtrate[df_filtrate['anno'] == int(filtro_anno_r)]
+            if filtro_testo_r:
+                df_filtrate = df_filtrate[df_filtrate['descrizione'].str.contains(filtro_testo_r, case=False, na=False)]
+            
+            st.markdown(f"**{len(df_filtrate)} ricevute trovate**")
+            
+            # Mostra ricevute in griglia
+            cols_per_row = 3
+            for i in range(0, len(df_filtrate), cols_per_row):
+                cols = st.columns(cols_per_row)
+                for j, (idx, row) in enumerate(df_filtrate.iloc[i:i+cols_per_row].iterrows()):
+                    with cols[j]:
+                        with st.container(border=True):
+                            st.markdown(f"**{row['ricevuta_nome']}**")
+                            st.caption(f"{row['data']} | {row['tipo']} | {row['voce']}")
+                            if row['descrizione']:
+                                st.caption(f"📝 {row['descrizione']}")
+                            if row.get('importo'):
+                                st.markdown(f"**{row['importo']:.2f} EUR**")
+                            
+                            # Mostra anteprima e download
+                            dati_ricevuta = scarica_ricevuta(row['ricevuta_percorso'])
+                            if dati_ricevuta:
+                                ext = os.path.splitext(row['ricevuta_nome'])[1].lower()
+                                if ext in ['.png', '.jpg', '.jpeg']:
+                                    st.image(dati_ricevuta, width=250)
+                                st.download_button(
+                                    ":material/download: Scarica",
+                                    data=dati_ricevuta,
+                                    file_name=row['ricevuta_nome'],
+                                    key=f"dl_ricevuta_{row['id']}",
+                                    use_container_width=True
+                                )
+                            else:
+                                st.warning("File non disponibile")
 
 # ─── PAGINA: ARCHIVIO PAGAMENTI ────────────────────────────
 elif pagina == "Archivio pagamenti":
@@ -1667,3 +2191,283 @@ elif pagina == "Backup & Ripristino":
                                 st.error(msg_r)
                 except Exception as e:
                     st.error(f"Errore lettura backup: {str(e)}")
+
+# ─── PAGINA: GUIDA ─────────────────────────────────────────
+elif pagina == "Guida":
+    st.markdown("### :material/menu_book: Guida all'uso")
+    st.caption("Manuale completo del Gestionale Contabilità Francesco. Seleziona un argomento per scoprire come usare ogni funzione.")
+
+    guida_tab = st.tabs([
+        ":material/rocket_launch: Introduzione",
+        ":material/add_circle: Registrazione movimenti",
+        ":material/upload_file: Estratto conto",
+        ":material/bed: Prenotazioni & Ospiti",
+        ":material/calendar_clock: Scadenzario",
+        ":material/analytics: Resoconto & Analisi",
+        ":material/folder: Ricevute & Pagamenti",
+        ":material/settings: Categorie",
+        ":material/save: Backup & Ripristino",
+        ":material/help: FAQ & Suggerimenti"
+    ])
+
+    # ── INTRODUZIONE ──
+    with guida_tab[0]:
+        st.markdown("#### :material/rocket_launch: Benvenuto nel Gestionale Contabilità")
+        st.write("""
+Questo gestionale ti permette di **monitorare entrate e uscite**, gestire le **prenotazioni del B&B**,
+tenere sotto controllo le **scadenze** e **archiviare le ricevute** fiscali, il tutto con i dati salvati
+in modo sicuro su **Supabase** (cloud).
+
+**Cosa puoi fare con l'app:**
+- 📥 Registrare manualmente entrate e uscite
+- 📊 Importare automaticamente gli estratti conto bancari (Excel/CSV)
+- 🛏️ Gestire prenotazioni, ospiti, commissioni OTA e tasse di soggiorno
+- ⏰ Tenere traccia delle scadenze con promemoria automatici
+- 📈 Analizzare i dati con grafici e report fiscali
+- 🗂️ Archiviare e cercare le ricevute
+- 💾 Creare backup e ripristinare i dati
+""")
+        st.info("💡 **Suggerimento:** usa la barra laterale a sinistra per navigare tra le diverse sezioni dell'app.")
+
+    # ── REGISTRAZIONE MOVIMENTI ──
+    with guida_tab[1]:
+        st.markdown("#### :material/add_circle: Nuova registrazione")
+        st.write("""
+Questa pagina ti permette di **inserire manualmente** un movimento contabile (entrata o uscita).
+
+**Campi da compilare:**
+- **Tipo** — scegli se è un'*Entrata* (denaro che entra) o un'*Uscita* (denaro che esce)
+- **Voce** — la categoria contabile (es. Fatturato, Affitto, Bollette...)
+- **Data** — la data del movimento
+- **Da chi** — il cliente o fornitore (opzionale)
+- **Importo** — l'importo in euro
+- **Metodo di pagamento** — Contanti, POS, Bonifico, Carta, Assegno o Altro
+- **Note** — eventuali dettagli aggiuntivi
+- **Ricevuta** — puoi allegare un PDF o un'immagine della ricevuta
+
+Dopo aver compilato i campi, premi **"Registra movimento"** per salvare.
+""")
+        st.success("✅ Il movimento viene salvato immediatamente su Supabase e sarà visibile in *Resoconto & analisi*.")
+
+    # ── ESTRATTO CONTO ──
+    with guida_tab[2]:
+        st.markdown("#### :material/upload_file: Carica & Analizza Estratto Conto")
+        st.write("""
+Questa funzione ti permette di **importare automaticamente** le transazioni dal tuo estratto conto bancario.
+
+**Formati supportati:** Excel (`.xlsx`, `.xls`) e CSV (`.csv`).
+
+**Come funziona:**
+1. **Carica il file** dell'estratto conto
+2. **Seleziona le colonne** corrispondenti (Data, Descrizione, Importo)
+   - L'app cerca automaticamente le colonne più comuni
+   - Puoi scegliere tra *colonna singola* (con segno +/-) o *due colonne separate* (Entrate/Uscite)
+3. **Imposta il metodo di pagamento** predefinito e la persona/ente
+4. **L'app analizza e categorizza** automaticamente ogni transazione
+5. **Controlla il riepilogo** (totali entrate/uscite, saldo iniziale/finale)
+6. **Modifica le transazioni** se necessario (categoria, metodo, descrizione)
+7. **Importa** le transazioni selezionate nel database
+
+**Funzioni automatiche:**
+- 🔍 **Rilevamento duplicati** — le transazioni già presenti vengono deselezionate automaticamente
+- 🏷️ **Categorizzazione automatica** — l'app riconosce bollette, affitti, stipendi, F24, ecc.
+- 📊 **Grafici** — suddivisione spese per categoria e dettaglio utenze
+""")
+        st.warning("💡 **Nota:** Se hai un file PDF, esportalo come Excel o CSV dal tuo home banking prima di caricarlo.")
+
+    # ── PRENOTAZIONI & OSPITI ──
+    with guida_tab[3]:
+        st.markdown("#### :material/bed: Prenotazioni & Ospiti")
+        st.write("""
+Questa sezione ti permette di **gestire le prenotazioni del B&B** e registrare i soggiorni in contabilità.
+
+**Registrare una nuova prenotazione:**
+1. Vai nel tab **"Nuova prenotazione"**
+2. Inserisci il **nome dell'ospite**, le date di **check-in** e **check-out**
+3. Seleziona la **camera**, il **canale** (Diretto, Booking, Airbnb, Expedia, Altro)
+4. Inserisci l'**importo del soggiorno**, la **commissione** del canale e la **tassa di soggiorno**
+5. Premi **"Salva prenotazione"**
+
+**Stati delle prenotazioni:**
+- 🟦 **Confermata** — prenotazione accettata, in attesa
+- 🟧 **In corso** — l'ospite è in casa
+- 🟩 **Completata** — soggiorno terminato e registrato in contabilità
+- 🟥 **Cancellata** — prenotazione annullata
+
+**Registrare in contabilità:**
+Quando il soggiorno è completato, premi **"Registra in contabilità"**:
+- L'**importo del soggiorno** viene registrato come *entrata* (voce "Fatturato / Vendite")
+- La **commissione** del canale viene registrata come *uscita*
+- La **tassa di soggiorno** viene registrata come *uscita* separata
+""")
+
+    # ── SCADENZARIO ──
+    with guida_tab[4]:
+        st.markdown("#### :material/calendar_clock: Scadenzario & Promemoria")
+        st.write("""
+Questa sezione ti aiuta a **non dimenticare le scadenze** (bollette, rate, F24, affitti...).
+
+**Registrare una nuova scadenza:**
+1. Vai nel tab **"Nuova scadenza"**
+2. Inserisci la **descrizione**, il **tipo** (Uscita/Entrata) e la **voce contabile**
+3. Imposta l'**importo** e la **data di scadenza**
+4. Scegli la **ricorrenza** (Nessuna, Settimanale, Mensile, Annuale...)
+5. Premi **"Salva Scadenza"**
+
+**Promemoria automatici:**
+- 🚨 Le scadenze **scadute** vengono evidenziate in rosso
+- ⏰ Le scadenze **entro 7 giorni** vengono evidenziate in arancione
+- 🟢 Le scadenze **future** sono in verde
+- Un **banner globale** in cima all'app ti avvisa delle scadenze imminenti
+
+**Segnare come pagato:**
+Quando saldi una scadenza, premi **"Segna come Pagato"**:
+- Il movimento viene **registrato automaticamente in contabilità**
+- Se la scadenza è **ricorrente**, viene calcolata e impostata la **prossima data**
+""")
+
+    # ── RESOCONTO & ANALISI ──
+    with guida_tab[5]:
+        st.markdown("#### :material/analytics: Resoconto & analisi")
+        st.write("""
+Questa pagina ti mostra il **quadro completo** della tua contabilità nel periodo selezionato.
+
+**Funzioni principali:**
+- **Riepilogo** — totali entrate, uscite e saldo netto
+- **Lista transazioni** — tutte le transazioni del periodo con dettaglio e possibilità di eliminazione
+- **Analisi per voce** — totali e grafici per categoria (entrate e uscite)
+- **Analisi per metodo** — totali per metodo di pagamento
+- **Report fiscali** — riepilogo mensile e trimestrale per la dichiarazione fiscale
+
+**Esportazioni:**
+- 📄 **Scarica resoconto** — file di testo con il dettaglio completo
+- 📄 **Scarica report fiscale** — riepilogo mensile/trimestrale per il commercialista
+""")
+
+    # ── RICEVUTE & PAGAMENTI ──
+    with guida_tab[6]:
+        st.markdown("#### :material/folder: Archivio ricevute & Archivio pagamenti")
+
+        st.markdown("##### :material/folder: Archivio ricevute")
+        st.write("""
+Visualizza, cerca e scarica tutte le **ricevute** caricate con i movimenti.
+
+**Filtri disponibili:**
+- Per **tipo** (Entrata/Uscita)
+- Per **anno**
+- Per **descrizione** (ricerca testuale)
+
+Le ricevute vengono mostrate in una griglia con anteprima (per le immagini) e pulsante di download.
+""")
+
+        st.markdown("##### :material/payments: Archivio pagamenti")
+        st.write("""
+Storico completo di **tutti i pagamenti** registrati.
+
+**Filtri disponibili:**
+- Per **tipo** (Entrata/Uscita)
+- Per **metodo** di pagamento
+- Per **anno**
+- Per **persona**
+
+Include riepilogo entrate/uscite/saldo ed **export CSV** dei dati filtrati.
+""")
+
+    # ── CATEGORIE ──
+    with guida_tab[7]:
+        st.markdown("#### :material/settings: Gestione categorie")
+        st.write("""
+Questa pagina ti permette di **gestire le voci contabili** (categorie) usate per classificare i movimenti.
+
+**Aggiungere una categoria:**
+1. Seleziona il **tipo** (Entrata o Uscita)
+2. Inserisci il **nome** della nuova categoria
+3. Premi **"Aggiungi"**
+
+**Visualizzare le categorie:**
+- Usa il filtro per tipo per vedere le categorie di entrata o uscita
+- Le categorie vengono usate in *Nuova registrazione*, *Scadenzario* e *Estratto conto*
+""")
+        st.info("💡 Le categorie predefinite vengono create automaticamente al primo avvio dell'app.")
+
+    # ── BACKUP & RIPRISTINO ──
+    with guida_tab[8]:
+        st.markdown("#### :material/save: Backup & Ripristino")
+        st.write("""
+Questa sezione ti permette di **proteggere i tuoi dati** creando backup e ripristinandoli quando necessario.
+
+**Creare un backup:**
+1. Vai nel tab **"Crea Backup"**
+2. Premi **"Crea backup ora"**
+3. Il backup salva **transazioni, categorie e scadenze** in un file JSON
+4. Puoi **scaricare** il file per conservarlo in un luogo sicuro
+
+**Ripristinare un backup:**
+1. Vai nel tab **"Ripristina"**
+2. Seleziona il backup da ripristinare
+3. **Leggi attentamente l'avviso** e spunta la conferma
+4. Premi **"Ripristina ora"**
+
+> ⚠️ **Attenzione:** il ripristino **sovrascrive tutti i dati attuali** su Supabase con quelli del backup. Questa operazione è **irreversibile**.
+""")
+        st.success("💡 **Consiglio:** crea un backup regolarmente (es. una volta al mese) e conserva i file in un luogo sicuro.")
+
+    # ── FAQ & SUGGERIMENTI ──
+    with guida_tab[9]:
+        st.markdown("#### :material/help: FAQ & Suggerimenti")
+
+        with st.expander("🔐 Come accedo all'app?"):
+            st.write("""
+L'app richiede un **login**. Le credenziali vengono configurate nel file `dev_secrets.toml` (in locale)
+o nei secrets di Streamlit Cloud. Se non configurato, le credenziali predefinite sono **admin/admin**.
+""")
+
+        with st.expander("☁️ Dove vengono salvati i dati?"):
+            st.write("""
+Tutti i dati (transazioni, categorie, scadenze, prenotazioni) vengono salvati su **Supabase**, un database cloud.
+Le **ricevute** vengono caricate su Supabase Storage (con fallback locale). I **backup** vengono salvati in locale nella cartella `backups/`.
+""")
+
+        with st.expander("📥 Come importo un estratto conto in PDF?"):
+            st.write("""
+L'app non legge direttamente i PDF. **Esporta il PDF come Excel o CSV** dal tuo home banking,
+poi carica il file nella pagina *Carica Estratto Conto*.
+""")
+
+        with st.expander("🔄 Come funzionano le scadenze ricorrenti?"):
+            st.write("""
+Quando registri una scadenza con una **ricorrenza** (es. Mensile), dopo averla segnata come pagata
+l'app calcola automaticamente la **prossima data** e la imposta come nuova scadenza in attesa.
+""")
+
+        with st.expander("💾 Con quale frequenza dovrei fare un backup?"):
+            st.write("""
+È consigliabile creare un backup **almeno una volta al mese**, oppure dopo ogni modifica importante
+dei dati. Conserva i file di backup in un luogo sicuro (es. cloud, disco esterno).
+""")
+
+        with st.expander("🛏️ Come registro una prenotazione in contabilità?"):
+            st.write("""
+Quando il soggiorno è completato, nella scheda della prenotazione premi **"Registra in contabilità"**.
+L'app registrerà automaticamente l'entrata del soggiorno, la commissione del canale e la tassa di soggiorno.
+""")
+
+        with st.expander("📊 Come genero il report fiscale?"):
+            st.write("""
+Vai in *Resoconto & analisi*, seleziona il periodo desiderato e apri il tab **"Report fiscali"**.
+Qui trovi il riepilogo mensile e trimestrale, il grafico andamento e il pulsante per **scaricare il report**.
+""")
+
+        with st.expander("❓ L'app non si avvia. Cosa faccio?"):
+            st.write("""
+1. Verifica che il file `dev_secrets.toml` o `.env` contenga le credenziali Supabase corrette
+2. Verifica che le dipendenze siano installate: `pip install -r requirements.txt`
+3. Su Windows, usa **`avvia_app.bat`** (doppio clic) che verifica tutto automaticamente
+4. Controlla che la tabella `transazioni` esista su Supabase (esegui `supabase_setup.sql`)
+""")
+
+        st.space("small")
+        st.markdown("---")
+        st.caption("Gestionale Contabilità Francesco — Guida in linea v2.5")
+
+
