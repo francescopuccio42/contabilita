@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS transazioni (
     descrizione TEXT,
     ricevuta_nome TEXT,
     ricevuta_percorso TEXT,
+    da_estratto_conto BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -50,6 +51,7 @@ ON CONFLICT (nome) DO NOTHING;
 
 -- 4. Aggiungi colonna persona se non esiste già (per aggiornamento)
 ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS persona TEXT DEFAULT '';
+ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS da_estratto_conto BOOLEAN DEFAULT FALSE;
 
 -- 5. Disabilita Row Level Security per permettere operazioni CRUD
 --    con la chiave anonima (necessario per l'app Streamlit)

@@ -244,7 +244,7 @@ try:
 except Exception:
     pass
 
-def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, descrizione, ricevuta_file):
+def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, descrizione, ricevuta_file, da_estratto_conto=False):
     ricevuta_nome = None
     ricevuta_percorso = None
     if ricevuta_file is not None:
@@ -257,9 +257,16 @@ def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, d
         "metodo_pagamento": metodo_pagamento,
         "persona": persona if persona else None,
         "descrizione": descrizione if descrizione else None,
-        "ricevuta_nome": ricevuta_nome, "ricevuta_percorso": ricevuta_percorso
+        "ricevuta_nome": ricevuta_nome, "ricevuta_percorso": ricevuta_percorso,
+        "da_estratto_conto": da_estratto_conto
     }
-    response = supabase.table("transazioni").insert(data_inserimento).execute()
+    try:
+        response = supabase.table("transazioni").insert(data_inserimento).execute()
+    except Exception:
+        if "da_estratto_conto" in data_inserimento:
+            del data_inserimento["da_estratto_conto"]
+        response = supabase.table("transazioni").insert(data_inserimento).execute()
+        
     if hasattr(response, 'error') and response.error:
         st.error(f"Errore: {response.error}")
         return False
@@ -276,8 +283,42 @@ def ottieni_transazioni(data_inizio=None, data_fine=None):
     query = query.order("data", desc=True).order("id", desc=True)
     response = query.execute()
     if response.data:
-        return pd.DataFrame(response.data)
+        df = pd.DataFrame(response.data)
+        if 'da_estratto_conto' not in df.columns:
+            df['da_estratto_conto'] = False
+        return df
     return pd.DataFrame()
+
+def aggiorna_da_estratto_conto(id_transazione, da_estratto_conto):
+    try:
+        supabase.table("transazioni").update({"da_estratto_conto": da_estratto_conto}).eq("id", id_transazione).execute()
+        return True
+    except Exception:
+        return False
+
+def salva_ultimo_estratto_conto(df):
+    try:
+        percorso = os.path.join(BASE_DIR, "ultimo_estratto_conto.json")
+        # Convert date column to string for json compatibility
+        df_save = df.copy()
+        if 'Data' in df_save.columns:
+            df_save['Data'] = df_save['Data'].astype(str)
+        df_save.to_json(percorso, orient="records", date_format="iso", indent=2)
+        return True
+    except Exception:
+        return False
+
+def carica_ultimo_estratto_conto():
+    percorso = os.path.join(BASE_DIR, "ultimo_estratto_conto.json")
+    if os.path.exists(percorso):
+        try:
+            df = pd.read_json(percorso)
+            if not df.empty and 'Data' in df.columns:
+                df['Data'] = pd.to_datetime(df['Data']).dt.date
+            return df
+        except Exception:
+            return None
+    return None
 
 def elimina_transazione(id_transazione, percorso_ricevuta):
     if percorso_ricevuta:
@@ -828,7 +869,22 @@ st.space("small")
 if pagina == "Nuova registrazione":
     st.markdown("### :material/add_circle: Nuova registrazione")
     
+    with st.expander("📖 **Guida rapida** — Come registrare un movimento", expanded=False):
+        st.markdown("""
+**1. Scegli il tipo** — premi **Entrata** (denaro che entra) o **Uscita** (denaro che esce).  
+**2. Seleziona la voce** — la categoria contabile (es. Fatturato, Affitto, Bollette).  
+**3. Inserisci la data** — di solito è oggi, ma puoi cambiarla.  
+**4. Scrivi "Da chi"** — il cliente o fornitore (facoltativo).  
+**5. Inserisci l'importo** — in euro (es. 100,00).  
+**6. Scegli il metodo** — Contanti, POS, Bonifico, Carta, Assegno o Altro.  
+**7. Aggiungi note e ricevuta** (facoltativi).  
+**8. Premi** 🟦 **"Registra movimento"** in fondo alla pagina.  
+
+✅ Fatto! Il movimento è salvato e lo trovi in *Resoconto & analisi*.
+""")
+    
     with st.container(border=True):
+
         col1, col2 = st.columns(2)
         with col1:
             tipo_movimento = st.segmented_control(
@@ -877,44 +933,88 @@ elif pagina == "Carica Estratto Conto":
     st.caption("Carica il tuo estratto conto bancario in formato **Excel (.xlsx, .xls)** o **CSV (.csv)** per analizzare, categorizzare automaticamente e importare le transazioni nel database.")
     st.caption("💡 **Nota:** Se hai un file PDF, esportalo come Excel o CSV dal tuo home banking, oppure usa la pagina *Nuova registrazione* per inserire manualmente le transazioni.")
 
+    # ─── GUIDA INLINE ESTRATTO CONTO ─────────────────────
+    with st.expander("📖 **Guida rapida: come usare l'Estratto Conto**", expanded=False):
+        st.markdown("""
+**Passo 1 — Carica il file**  
+Carica il file dell'estratto conto in formato **Excel (.xlsx, .xls)** o **CSV (.csv)**.  
+Vedrai uno spinner *"Caricamento del file in corso..."* e poi il messaggio *"✅ File caricato con successo!"*.
+
+**Passo 2 — Seleziona le colonne**  
+Dopo il caricamento, l'app mostra un'**anteprima** delle prime righe. Devi indicare quali colonne corrispondono a:
+- **Data** — la colonna con la data del movimento (es. "Data contabile", "Data operazione")
+- **Descrizione** — la colonna con la causale o descrizione (es. "Causale", "Operazione", "Dettaglio")
+- **Importo** — puoi scegliere tra:
+  - *Colonna singola* (con segno **+** per le entrate e **-** per le uscite)
+  - *Due colonne separate* (una per le **Entrate** e una per le **Uscite**)
+
+> ⚠️ **Importante:** se non selezioni le colonne obbligatorie (Data, Descrizione e Importo), l'app mostra l'avviso *"Seleziona le colonne corrette per procedere con l'analisi"* e **non prosegue**. L'app cerca automaticamente le colonne più comuni, ma devi verificarle.
+
+**Passo 3 — Analisi automatica**  
+L'app **categorizza automaticamente** ogni transazione (bollette, affitti, F24, canali prenotazione, ecc.) e **rileva i duplicati** già presenti nel database.
+
+**Passo 4 — Riconciliazione**  
+L'app confronta le voci con le transazioni già registrate:
+- ✅ **Riconciliata** = stessa data e importo già presenti
+- 🟡 **Importo presente** = stesso importo ma data diversa
+- 🆕 **Nuova voce** = non ancora registrata
+
+**Passo 5 — Riepilogo e saldo**  
+Controlla i totali entrate/uscite e inserisci il **saldo iniziale e finale** del conto per verificare che tutto torni.
+
+**Passo 6 — Modifica e importa**  
+Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infine premere **"Importa Transazioni Selezionate"** per salvarle nel database.
+""")
+
     file_caricato = st.file_uploader("Seleziona il file dell'estratto conto", type=["xlsx", "xls", "csv"])
+
     if file_caricato is not None:
         try:
             nome_file = file_caricato.name.lower()
             estensione = nome_file.split('.')[-1] if '.' in nome_file else ''
             
-            if estensione == 'csv':
-                # Leggi file CSV con rilevamento automatico del separatore
-                import csv as csv_module
-                contenuto = file_caricato.getvalue().decode('utf-8', errors='replace')
-                # Rileva il separatore (virgola, punto e virgola, tab)
-                try:
-                    dialetto = csv_module.Sniffer().sniff(contenuto[:2048], delimiters=',;\t')
-                    separatore = dialetto.delimiter
-                except Exception:
-                    separatore = ';'  # Default per file italiani
-                
-                df_excel = pd.read_csv(io.BytesIO(file_caricato.getvalue()), sep=separatore, encoding='utf-8', on_bad_lines='skip')
-                foglio_selezionato = "CSV"
-            else:
-                # Leggi file Excel
-                excel_file = pd.ExcelFile(file_caricato)
-                nomi_fogli = excel_file.sheet_names
-                
-                # Seleziona foglio se ce n'è più di uno
-                if len(nomi_fogli) > 1:
-                    foglio_selezionato = st.selectbox("Seleziona il foglio di lavoro:", nomi_fogli)
+            with st.spinner("⏳ Caricamento del file in corso..."):
+                if estensione == 'csv':
+                    # Leggi file CSV con rilevamento automatico del separatore
+                    import csv as csv_module
+                    contenuto = file_caricato.getvalue().decode('utf-8', errors='replace')
+                    # Rileva il separatore (virgola, punto e virgola, tab)
+                    try:
+                        dialetto = csv_module.Sniffer().sniff(contenuto[:2048], delimiters=',;\t')
+                        separatore = dialetto.delimiter
+                    except Exception:
+                        separatore = ';'  # Default per file italiani
+                    
+                    df_excel = pd.read_csv(io.BytesIO(file_caricato.getvalue()), sep=separatore, encoding='utf-8', on_bad_lines='skip')
+                    foglio_selezionato = "CSV"
                 else:
-                    foglio_selezionato = nomi_fogli[0]
-                
-                # Leggi il file
-                df_excel = pd.read_excel(file_caricato, sheet_name=foglio_selezionato)
+                    # Leggi file Excel
+                    excel_file = pd.ExcelFile(file_caricato)
+                    nomi_fogli = excel_file.sheet_names
+                    
+                    # Seleziona foglio se ce n'è più di uno
+                    if len(nomi_fogli) > 1:
+                        foglio_selezionato = st.selectbox("Seleziona il foglio di lavoro:", nomi_fogli)
+                    else:
+                        foglio_selezionato = nomi_fogli[0]
+                    
+                    # Leggi il file
+                    df_excel = pd.read_excel(file_caricato, sheet_name=foglio_selezionato)
+            
+            st.success(f"✅ File **{file_caricato.name}** caricato con successo! ({len(df_excel)} righe rilevate)")
             
             st.markdown("#### :material/preview: Anteprima del file caricato")
             st.caption("Ecco le prime 10 righe del file. Seleziona le colonne corrispondenti qui sotto.")
             st.dataframe(df_excel.head(10), width='stretch')
+
+            # Visualizzazione completa dell'estratto conto
+            with st.expander(f"👁️ **Visualizza l'estratto conto completo** ({len(df_excel)} righe)", expanded=False):
+                st.caption("Ecco tutte le righe del file caricato, così puoi visionare l'estratto conto nel suo complesso.")
+                st.dataframe(df_excel, width='stretch')
+
             
             # Configurazione colonne
+
             col_sc1, col_sc2, col_sc3 = st.columns(3)
             colonne_disponibili = [""] + list(df_excel.columns)
             
@@ -928,6 +1028,25 @@ elif pagina == "Carica Estratto Conto":
                     if any(p in col_lower for p in nomi_possibili):
                         return col
                 return ""
+            
+            # ─── MEMORIZZAZIONE SELEZIONI COLONNE (per file della stessa banca) ───
+            # Se l'utente ha già selezionato le colonne in un caricamento precedente,
+            # le riutilizza automaticamente se le colonne esistono nel nuovo file.
+            def salva_mappatura_colonne():
+                """Salva la mappatura delle colonne selezionate in session_state."""
+                st.session_state["ec_mappatura"] = {
+                    "col_data": col_data,
+                    "col_desc": col_desc,
+                    "tipo_importo": tipo_importo,
+                    "col_importo": col_importo,
+                    "col_importo_entrata": col_importo_entrata,
+                    "col_importo_uscita": col_importo_uscita,
+                    "metodo_predefinito": metodo_predefinito,
+                    "persona_predefinita": persona_predefinita,
+                }
+            
+            # Recupera la mappatura salvata (se presente)
+            mappatura_salvata = st.session_state.get("ec_mappatura", {})
             
             # Cerca la colonna data (escludendo "data valuta" che è diversa da "data contabile")
             col_data_prev = trova_colonna(["data contabile", "data operazione", "data"], df_excel.columns, escludi=["valuta"])
@@ -958,12 +1077,28 @@ elif pagina == "Carica Estratto Conto":
             else:
                 tipo_importo_default = "Colonna singola (segno +/-)"
             
+            # Se esiste una mappatura salvata, usa i valori salvati come default
+            # (solo se le colonne salvate esistono nel nuovo file)
+            if mappatura_salvata:
+                if mappatura_salvata.get("col_data") in colonne_disponibili:
+                    col_data_prev = mappatura_salvata["col_data"]
+                if mappatura_salvata.get("col_desc") in colonne_disponibili:
+                    col_desc_prev = mappatura_salvata["col_desc"]
+                if mappatura_salvata.get("tipo_importo"):
+                    tipo_importo_default = mappatura_salvata["tipo_importo"]
+                if mappatura_salvata.get("col_importo") in colonne_disponibili:
+                    col_imp_prev = mappatura_salvata["col_importo"]
+                if mappatura_salvata.get("col_importo_entrata") in colonne_disponibili:
+                    col_imp_ent_prev = mappatura_salvata["col_importo_entrata"]
+                if mappatura_salvata.get("col_importo_uscita") in colonne_disponibili:
+                    col_imp_usc_prev = mappatura_salvata["col_importo_uscita"]
+            
             with col_sc1:
                 col_data = st.selectbox("Colonna Data:", colonne_disponibili, index=colonne_disponibili.index(col_data_prev) if col_data_prev in colonne_disponibili else 0)
             with col_sc2:
                 col_desc = st.selectbox("Colonna Descrizione:", colonne_disponibili, index=colonne_disponibili.index(col_desc_prev) if col_desc_prev in colonne_disponibili else 0)
             with col_sc3:
-                tipo_importo = st.radio("Struttura importo:", ["Colonna singola (segno +/-)", "Due colonne separate (Entrate e Uscite)"], horizontal=True)
+                tipo_importo = st.radio("Struttura importo:", ["Colonna singola (segno +/-)", "Due colonne separate (Entrate e Uscite)"], horizontal=True, index=0 if tipo_importo_default == "Colonna singola (segno +/-)" else 1)
                 
             col_sc4, col_sc5 = st.columns(2)
             if tipo_importo == "Colonna singola (segno +/-)":
@@ -982,9 +1117,13 @@ elif pagina == "Carica Estratto Conto":
                 
             col_met_def, col_pers_def = st.columns(2)
             with col_met_def:
-                metodo_predefinito = st.selectbox("Metodo di pagamento predefinito:", METODI_PAGAMENTO, index=METODI_PAGAMENTO.index("Bonifico") if "Bonifico" in METODI_PAGAMENTO else 0)
+                metodo_predefinito = st.selectbox("Metodo di pagamento predefinito:", METODI_PAGAMENTO, index=METODI_PAGAMENTO.index(mappatura_salvata.get("metodo_predefinito")) if mappatura_salvata.get("metodo_predefinito") in METODI_PAGAMENTO else (METODI_PAGAMENTO.index("Bonifico") if "Bonifico" in METODI_PAGAMENTO else 0))
             with col_pers_def:
-                persona_predefinita = st.text_input("Persona / Ente predefinito (opzionale):", placeholder="Es. Banca, Fornitore...")
+                persona_predefinita = st.text_input("Persona / Ente predefinito (opzionale):", value=mappatura_salvata.get("persona_predefinita", ""), placeholder="Es. Banca, Fornitore...")
+            
+            # Salva la mappatura delle colonne selezionate per i prossimi caricamenti
+            salva_mappatura_colonne()
+
                 
             # Verifica mappatura minima
             mappatura_ok = False
@@ -1004,7 +1143,7 @@ elif pagina == "Carica Estratto Conto":
                     # Salta righe dove data o descrizione sono nulle
                     val_data = row[col_data]
                     val_desc = row[col_desc]
-                    if pd.isna(val_data) or pd.isna(val_desc):
+                    if bool(pd.isna(val_data)) or bool(pd.isna(val_desc)):
                         continue
                         
                     # Conversione data
@@ -1024,7 +1163,7 @@ elif pagina == "Carica Estratto Conto":
                     
                     if tipo_importo == "Colonna singola (segno +/-)":
                         val_imp = row[col_importo]
-                        if pd.isna(val_imp):
+                        if bool(pd.isna(val_imp)):
                             continue
                         try:
                             # Gestione se stringa o float
@@ -1053,7 +1192,7 @@ elif pagina == "Carica Estratto Conto":
                         usc_valida = False
                         
                         try:
-                            if not pd.isna(val_ent) and str(val_ent).strip() != "":
+                            if not bool(pd.isna(val_ent)) and str(val_ent).strip() != "":
                                 f_ent = float(str(val_ent).replace('.', '').replace(',', '.')) if isinstance(val_ent, str) else float(val_ent)
                                 if f_ent != 0:
                                     ent_valida = True
@@ -1062,7 +1201,7 @@ elif pagina == "Carica Estratto Conto":
                             pass
                             
                         try:
-                            if not ent_valida and not pd.isna(val_usc) and str(val_usc).strip() != "":
+                            if not ent_valida and not bool(pd.isna(val_usc)) and str(val_usc).strip() != "":
                                 f_usc = float(str(val_usc).replace('.', '').replace(',', '.')) if isinstance(val_usc, str) else float(val_usc)
                                 if f_usc != 0:
                                     usc_valida = True
@@ -1128,6 +1267,83 @@ elif pagina == "Carica Estratto Conto":
                             st.warning(f"⚠️ Rilevati {possibili_duplicati} possibili duplicati già presenti nel database! Queste righe sono state deselezionate automaticamente nella tabella sottostante.")
                         
                         df_elaborato.drop(columns=['data_str'], inplace=True)
+                    
+                    # ─── RICONCILIAZIONE CON IL PROGRAMMA ─────────────────────
+                    st.markdown("#### :material/rule: Riconciliazione con le registrazioni esistenti")
+                    st.caption("Confronta le voci dell'estratto conto con le transazioni già registrate nel programma per verificare la corrispondenza.")
+                    
+                    # Recupera tutte le transazioni esistenti nel periodo (per la riconciliazione)
+                    try:
+                        df_db_periodo = ottieni_transazioni(min_date.strftime("%Y-%m-%d"), max_date.strftime("%Y-%m-%d"))
+                    except Exception:
+                        df_db_periodo = pd.DataFrame()
+                    
+                    if df_db_periodo.empty:
+                        st.info(":material/info: Nessuna transazione registrata nel programma per il periodo dell'estratto conto. Tutte le voci saranno considerate nuove.")
+                    else:
+                        # Prepara dati DB per confronto
+                        df_db_periodo['data_str'] = df_db_periodo['data'].astype(str)
+                        df_elaborato['data_str'] = df_elaborato['Data'].astype(str)
+                        
+                        # Stato riconciliazione per ogni riga dell'estratto conto
+                        stati_riconciliazione = []
+                        for idx_el, row_el in df_elaborato.iterrows():
+                            # Cerca corrispondenza esatta (stessa data, stesso importo, stesso tipo)
+                            match_esatto = df_db_periodo[
+                                (df_db_periodo['data_str'] == row_el['data_str']) &
+                                (df_db_periodo['importo'].round(2) == round(row_el['Importo'], 2)) &
+                                (df_db_periodo['tipo'] == row_el['Tipo'])
+                            ]
+                            if not match_esatto.empty:
+                                stati_riconciliazione.append("✅ Riconciliata")
+                            else:
+                                # Cerca corrispondenza parziale (stesso importo ma data diversa)
+                                match_importo = df_db_periodo[
+                                    (df_db_periodo['importo'].round(2) == round(row_el['Importo'], 2)) &
+                                    (df_db_periodo['tipo'] == row_el['Tipo'])
+                                ]
+                                if not match_importo.empty:
+                                    stati_riconciliazione.append("🟡 Importo presente (data diversa)")
+                                else:
+                                    stati_riconciliazione.append("🆕 Nuova voce")
+                        
+                        df_elaborato['Riconciliazione'] = stati_riconciliazione
+                        df_elaborato.drop(columns=['data_str'], inplace=True)
+                        
+                        # Riepilogo riconciliazione
+                        n_riconciliate = stati_riconciliazione.count("✅ Riconciliata")
+                        n_parziali = stati_riconciliazione.count("🟡 Importo presente (data diversa)")
+                        n_nuove = stati_riconciliazione.count("🆕 Nuova voce")
+                        
+                        col_ric1, col_ric2, col_ric3 = st.columns(3)
+                        with col_ric1:
+                            st.metric("✅ Riconciliate", f"{n_riconciliate}", border=True)
+                        with col_ric2:
+                            st.metric("🟡 Importo presente", f"{n_parziali}", border=True)
+                        with col_ric3:
+                            st.metric("🆕 Nuove voci", f"{n_nuove}", border=True)
+                        
+                        # Filtro per stato riconciliazione
+                        filtro_ric = st.segmented_control(
+                            "Filtra per stato riconciliazione",
+                            ["Tutte", "✅ Riconciliate", "🟡 Importo presente", "🆕 Nuove voci"],
+                            default="Tutte",
+                            key="filtro_riconciliazione"
+                        )
+                        
+                        if filtro_ric != "Tutte":
+                            df_elaborato_filtrato = df_elaborato[df_elaborato['Riconciliazione'] == filtro_ric]
+                        else:
+                            df_elaborato_filtrato = df_elaborato
+                        
+                        # Mostra tabella riconciliazione
+                        st.dataframe(
+                            df_elaborato_filtrato[['Data', 'Tipo', 'Voce', 'Importo', 'Descrizione', 'Riconciliazione']],
+                            hide_index=True,
+                            width='stretch'
+                        )
+                        
+                        st.caption("💡 **Legenda:** *Riconciliate* = già presenti nel programma con stessa data e importo • *Importo presente* = stesso importo ma data diversa (verifica manuale) • *Nuove voci* = non ancora registrate nel programma.")
                     
                     # Mostra Riepilogo dell'Estratto Conto prima dell'importazione
                     df_filtrato_importa = df_elaborato[df_elaborato['Importa'] == True]
@@ -1303,7 +1519,22 @@ elif pagina == "Prenotazioni & Ospiti":
     st.markdown("### :material/bed: Prenotazioni & Ospiti")
     st.caption("Gestisci le prenotazioni del B&B, gli ospiti e registra i soggiorni in contabilità.")
     
+    with st.expander("📖 **Guida rapida** — Come gestire le prenotazioni", expanded=False):
+        st.markdown("""
+**Registrare una nuova prenotazione:**  
+1. Apri il tab **"Nuova prenotazione"**.  
+2. Scrivi il **nome dell'ospite** e le date di **check-in** e **check-out**.  
+3. Scegli la **camera** e il **canale** (Diretto, Booking, Airbnb...).  
+4. Inserisci **importo**, **commissione** e **tassa di soggiorno**.  
+5. Premi 🟦 **"Salva prenotazione"**.  
+
+**Quando l'ospite arriva:** premi **"In corso"**.  
+**Quando il soggiorno finisce:** premi **"Registra in contabilità"** per salvare entrata, commissione e tassa.  
+**Per eliminare:** premi **"Elimina"**.
+""")
+    
     # Verifica esistenza tabella prenotazioni su Supabase
+
     prenotazioni_table_ok = True
     try:
         supabase.table("prenotazioni").select("id").limit(1).execute()
@@ -1488,7 +1719,23 @@ elif pagina == "Scadenzario & Promemoria":
     st.markdown("### :material/calendar_clock: Scadenzario & Promemoria")
     st.caption("Gestisci le tue scadenze, imposta le frequenze di ripetizione e ricevi promemoria automatici 1 settimana prima.")
     
+    with st.expander("📖 **Guida rapida** — Come gestire le scadenze", expanded=False):
+        st.markdown("""
+**Registrare una nuova scadenza:**  
+1. Apri il tab **"Nuova scadenza"**.  
+2. Scrivi la **descrizione** (es. Bolletta luce, Rata affitto, F24).  
+3. Scegli **tipo** (Uscita/Entrata) e **voce contabile**.  
+4. Inserisci **importo** e **data di scadenza**.  
+5. Scegli la **ricorrenza** (Nessuna, Mensile, Annuale...).  
+6. Premi 🟦 **"Salva Scadenza"**.  
+
+**Quando la paghi:** premi **"Segna come Pagato"** → il movimento viene registrato in contabilità e, se ricorrente, la data si sposta automaticamente alla prossima scadenza.  
+
+**Promemoria:** 🚨 rosso = scaduta • ⏰ arancione = entro 7 giorni • 🟢 verde = futura.
+""")
+    
     # Verifica esistenza tabella scadenze su Supabase
+
     scadenze_table_ok = True
     try:
         supabase.table("scadenze").select("id").limit(1).execute()
@@ -1676,7 +1923,20 @@ ALTER TABLE scadenze DISABLE ROW LEVEL SECURITY;
 elif pagina == "Resoconto & analisi":
     st.markdown("### :material/analytics: Resoconto & analisi")
     
+    with st.expander("📖 **Guida rapida** — Come leggere il resoconto", expanded=False):
+        st.markdown("""
+**1. Scegli il periodo** — imposta le date **Dal** e **Al** in alto.  
+**2. Guarda il riepilogo** — entrate, uscite e saldo del periodo.  
+**3. Esplora i tab:**  
+- **Lista transazioni** — tutti i movimenti, con dettaglio ed eliminazione.  
+- **Analisi per voce** — totali e grafici per categoria.  
+- **Analisi per metodo** — totali per metodo di pagamento.  
+- **Report fiscali** — riepilogo mensile/trimestrale per il commercialista.  
+**4. Scarica** — il resoconto completo o il report fiscale in formato testo.
+""")
+    
     with st.container(border=True):
+
         col_f1, col_f2 = st.columns(2)
         with col_f1:
             data_inizio_filtro = st.date_input("Dal:", value=date(date.today().year, 1, 1), key="data_inizio")

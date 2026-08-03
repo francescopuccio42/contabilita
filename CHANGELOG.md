@@ -2,7 +2,25 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [3.1.0] — 2026-08-03
+
+### Aggiunto
+- **Riconciliazione con le registrazioni esistenti**: nella pagina "Carica Estratto Conto" le voci dell'estratto conto vengono confrontate con le transazioni già presenti nel database, classificandole come *Riconciliata* (stessa data e importo), *Importo presente* (stesso importo ma data diversa) o *Nuova voce*, con riepilogo a metriche e filtro per stato di riconciliazione.
+- **Memorizzazione mappatura colonne**: le selezioni delle colonne (data, descrizione, importo, metodo e persona predefiniti) vengono salvate in `session_state` e riutilizzate automaticamente nei caricamenti successivi dello stesso tipo di file.
+- **Visualizzazione completa dell'estratto conto**: nuovo pannello espandibile per visionare tutte le righe del file caricato, oltre all'anteprima delle prime 10.
+- **Feedback di caricamento migliorato**: spinner *"Caricamento del file in corso..."* e messaggio di conferma *"File caricato con successo!"* con numero di righe rilevate.
+- **Guida rapida integrata**: nuovi pannelli espandibili "Guida rapida" nelle pagine *Nuova registrazione*, *Carica Estratto Conto*, *Prenotazioni & Ospiti*, *Scadenzario & Promemoria* e *Resoconto & analisi*.
+- **Tracciamento origine transazioni**: nuovo campo `da_estratto_conto` (BOOLEAN) nella tabella `transazioni` per distinguere i movimenti importati dall'estratto conto, con funzioni `aggiorna_da_estratto_conto()`, `salva_ultimo_estratto_conto()` e `carica_ultimo_estratto_conto()`.
+- **Modulo `config.py`**: nuovo modulo di configurazione centralizzata (secrets, ambiente, modalità DEMO, costanti e versione app).
+- **Modulo `ui/pages.py`**: refactoring delle pagine dell'interfaccia in un modulo separato per una migliore organizzazione del codice.
+
+### Modificato
+- **`aggiungi_transazione()`**: nuovo parametro `da_estratto_conto` con fallback automatico per gli schemi di database più vecchi che non hanno ancora la colonna.
+- **`ottieni_transazioni()`**: gestione della colonna `da_estratto_conto` mancante nei database esistenti.
+- **`supabase_setup.sql`**: aggiunta la colonna `da_estratto_conto BOOLEAN DEFAULT FALSE` alla tabella `transazioni` (sia nella `CREATE TABLE` sia come `ALTER TABLE` per i database esistenti).
+
 ## [2.5.0] — 2026-08-01
+
 
 ### Aggiunto
 - **Guida in linea**: nuova pagina "Guida" nell'app con manuale completo d'uso, organizzato in sezioni (Introduzione, Registrazione movimenti, Estratto conto, Prenotazioni & Ospiti, Scadenzario, Resoconto & Analisi, Ricevute & Pagamenti, Categorie, Backup & Ripristino, FAQ & Suggerimenti).
