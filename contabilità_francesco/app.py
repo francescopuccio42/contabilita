@@ -969,9 +969,18 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
     file_caricato = st.file_uploader("Seleziona il file dell'estratto conto", type=["xlsx", "xls", "csv"])
 
     if file_caricato is not None:
+        # Se è stato caricato un file diverso dal precedente, azzera la mappatura
+        # delle colonne salvata (evita che il formato di un file precedente
+        # "blocchi" la selezione delle colonne del nuovo file).
+        nome_file_corrente = file_caricato.name
+        if st.session_state.get("ec_file_precedente") != nome_file_corrente:
+            st.session_state["ec_file_precedente"] = nome_file_corrente
+            st.session_state.pop("ec_mappatura", None)
+
         try:
             nome_file = file_caricato.name.lower()
             estensione = nome_file.split('.')[-1] if '.' in nome_file else ''
+
             
             with st.spinner("⏳ Caricamento del file in corso..."):
                 if estensione == 'csv':
@@ -1132,10 +1141,16 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                     mappatura_ok = True
                 elif tipo_importo == "Due colonne separate (Entrate e Uscite)" and col_importo_entrata and col_importo_uscita:
                     mappatura_ok = True
+                # Fallback: se l'utente ha selezionato una colonna importo singola
+                # ma il formato è impostato su "due colonne", accetta comunque
+                elif col_importo:
+                    mappatura_ok = True
                     
             if not mappatura_ok:
-                st.warning("⚠️ Seleziona le colonne corrette per procedere con l'analisi.")
+                st.warning("⚠️ **Seleziona le colonne corrette per procedere con l'analisi.**")
+                st.info("Assicurati di aver selezionato: **Data**, **Descrizione** e **Importo** (oppure le colonne **Entrate** e **Uscite** se il tuo file le ha separate).")
             else:
+
                 # Elaborazione dati
                 transazioni_elaborate = []
                 

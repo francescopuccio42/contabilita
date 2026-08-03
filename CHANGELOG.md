@@ -2,7 +2,16 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [3.1.1] — 2026-08-03
+
+### Corretto
+- **Pulsante di importazione non visibile nella pagina "Carica Estratto Conto"**: risolto il problema per cui, dopo aver selezionato le colonne dell'estratto conto, il pulsante "Importa Transazioni Selezionate" non compariva. La causa era la mappatura delle colonne salvata in `session_state` che, riutilizzata tra file diversi, poteva "bloccare" la selezione (es. formato a due colonne salvato da un file precedente applicato a un file con una sola colonna importo).
+- **Azzera mappatura al cambio file**: la mappatura delle colonne salvata viene ora azzerata automaticamente quando viene caricato un file diverso dal precedente, evitando che il formato di un file precedente interferisca con il nuovo.
+- **Verifica mappatura più flessibile**: aggiunto un fallback che accetta la selezione di una colonna importo singola anche quando il formato è impostato su "due colonne separate", rendendo più robusto il riconoscimento delle colonne.
+- **Messaggio di guida migliorato**: l'avviso "Seleziona le colonne corrette" ora include istruzioni chiare su quali colonne selezionare (Data, Descrizione e Importo, oppure Entrate e Uscite).
+
 ## [3.1.0] — 2026-08-03
+
 
 ### Aggiunto
 - **Riconciliazione con le registrazioni esistenti**: nella pagina "Carica Estratto Conto" le voci dell'estratto conto vengono confrontate con le transazioni già presenti nel database, classificandole come *Riconciliata* (stessa data e importo), *Importo presente* (stesso importo ma data diversa) o *Nuova voce*, con riepilogo a metriche e filtro per stato di riconciliazione.
