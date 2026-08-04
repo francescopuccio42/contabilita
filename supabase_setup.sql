@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS transazioni (
     ricevuta_nome TEXT,
     ricevuta_percorso TEXT,
     da_estratto_conto BOOLEAN DEFAULT FALSE,
+    valuta TEXT DEFAULT 'EUR',
+    abi TEXT,
+    estratto_nome TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -49,9 +52,12 @@ INSERT INTO categorie (tipo, nome) VALUES
     ('Uscita', 'Altro (Uscita)')
 ON CONFLICT (nome) DO NOTHING;
 
--- 4. Aggiungi colonna persona se non esiste già (per aggiornamento)
+-- 4. Aggiungi colonne mancanti in modo idempotente (per aggiornamento)
 ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS persona TEXT DEFAULT '';
 ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS da_estratto_conto BOOLEAN DEFAULT FALSE;
+ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS valuta TEXT DEFAULT 'EUR';
+ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS abi TEXT;
+ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS estratto_nome TEXT;
 
 -- 5. Disabilita Row Level Security per permettere operazioni CRUD
 --    con la chiave anonima (necessario per l'app Streamlit)
@@ -96,4 +102,3 @@ CREATE TABLE IF NOT EXISTS prenotazioni (
 );
 
 ALTER TABLE prenotazioni DISABLE ROW LEVEL SECURITY;
-

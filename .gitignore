@@ -21,6 +21,9 @@ ricevute_uploads/
 # Backup files
 backups/
 
+# Archivio estratti conto (dati bancari sensibili)
+estratti_conto_archivio/
+
 # Virtual environment
 .venv/
 venv/

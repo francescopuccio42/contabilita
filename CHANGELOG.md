@@ -1,5 +1,35 @@
 # Changelog
 
+## [2.3] - 2026-08-04
+### Aggiunto
+- **Page "Archivio Estratti Conto"**: ogni file caricato viene salvato automaticamente come copia (anche se il PDF è scansionato/illeggibile, la copia resta) con elenco, download ed eliminazione per singolo file.
+- **Eliminazione selettiva per estratto conto**: colonna `estratto_nome` nelle transazioni; nel menu Elimina dell'archivio puoi scegliere se rimuovere **solo la copia fisica** (le transazioni restano) oppure **copia + transazioni di quel file** (le altre in memoria restano).
+- **Logout esplicito** documentato nella Guida (pulsante "Esci" nella barra laterale).
+- **Messaggio chiaro per PDF scansionati/illeggibili**: `pdf_a_dataframe` ora solleva un errore specifico che invita a esportare il PDF come Excel/CSV.
+- **Spinner di caricamento migliorato** con notifica di completamento (`st.toast`).
+- **Pulsante "Rimuovi il file caricato e riparti"** sempre visibile nella pagina di caricamento.
+- **Totali e movimenti per Descrizione**: per ogni descrizione (entrate e uscite) vengono mostrati totale e singoli movimenti che la compongono.
+- **FAQ aggiornate**: logout, eliminazione selettiva per estratto, copia PDF, eliminazione più mirata.
+
+### Modificato
+- `aggiorna_transazione` ora accetta anche `estratto_nome` (con fallback se la colonna non esiste nel DB).
+- Nuova funzione `elimina_transazioni_estratto(nome_estratto)` per rimuovere solo le transazioni di un file.
+- `supabase_setup.sql`: aggiunte le colonne `estratto_nome`, `valuta`, `abi` (idempotente).
+
+## [2.2] - 2026-08-04
+### Aggiunto
+- Import diretto degli **estratti conto in PDF** (estrazione automatica delle tabelle, pulizia descrizioni e salti dei saldi di periodo) tramite `processa_estratto.py`.
+- Colonne **Valuta** (default EUR) e **ABI** (opzionale) nel flusso di import e nelle visualizzazioni (*Resoconto & analisi*, *Archivio pagamenti*).
+- **Macrocategoria "Pagamenti - [Società]"** con sottocategorie automatiche per società (Telecom, Allianz, INPS, ecc.) create automaticamente nel DB.
+- **Proposta automatica di scadenze future** dagli estratti conto: rileva uscite ricorrenti con importi simili e le calendarizza come scadenze mensili.
+- **Annulla prova**: elimina in un colpo solo le transazioni appena importate.
+- **Azzeramento dati** in *Backup & Ripristino* per svuotare tutte le transazioni (utile dopo le prove).
+- **Totali per Descrizione** (entrate e uscite) sempre visibili in *Resoconto & analisi*.
+
+### Modificato
+- Aggiornato `supabase_setup.sql` con colonne `valuta` e `abi` (idempotente con `ADD COLUMN IF NOT EXISTS`).
+- Guida in linea aggiornata con FAQ su PDF, ABI, Valuta, macrocategoria Pagamenti e proposta scadenze.
+
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
 ## [3.1.1] — 2026-08-03

@@ -9,6 +9,7 @@ from dateutil.relativedelta import relativedelta
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from payment_methods import METODI_PAGAMENTO, normalizza_metodo_pagamento
+from processa_estratto import pdf_a_dataframe
 
 load_dotenv()
 
@@ -68,8 +69,10 @@ st.set_page_config(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "ricevute_uploads")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")
+ARCHIVIO_ESTRATTI_DIR = os.path.join(BASE_DIR, "estratti_conto_archivio")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
+os.makedirs(ARCHIVIO_ESTRATTI_DIR, exist_ok=True)
 
 RICORRENZE = ["Nessuna", "Settimanale", "Quindicinale", "Mensile", "Bimestrale", "Trimestrale", "Semestrale", "Annuale"]
 
@@ -191,8 +194,8 @@ with st.sidebar:
     
     pagina = st.radio(
         "Navigazione",
-        ["Nuova registrazione", "Carica Estratto Conto", "Prenotazioni & Ospiti", "Scadenzario & Promemoria", "Resoconto & analisi", "Archivio ricevute", "Archivio pagamenti", "Gestione categorie", "Backup & Ripristino", "Guida"],
-        captions=["Aggiungi un movimento", "Analizza ed importa da Excel", "Gestisci prenotazioni e ospiti", "Gestisci scadenze e promemoria", "Vedi entrate/uscite/grafici", "Visualizza e cerca ricevute", "Storico completo pagamenti", "Modifica le voci contabili", "Salva e ripristina i dati", "Manuale d'uso dell'app"],
+        ["Nuova registrazione", "Carica Estratto Conto", "Archivio Estratti Conto", "Prenotazioni & Ospiti", "Scadenzario & Promemoria", "Resoconto & analisi", "Archivio ricevute", "Archivio pagamenti", "Gestione categorie", "Backup & Ripristino", "Guida"],
+        captions=["Aggiungi un movimento", "Analizza ed importa da Excel/CSV/PDF", "Consulta gli estratti conto caricati", "Gestisci prenotazioni e ospiti", "Gestisci scadenze e promemoria", "Vedi entrate/uscite/grafici", "Visualizza e cerca ricevute", "Storico completo pagamenti", "Modifica le voci contabili", "Salva e ripristina i dati", "Manuale d'uso dell'app"],
         label_visibility="collapsed",
         key="nav"
     )
@@ -244,7 +247,7 @@ try:
 except Exception:
     pass
 
-def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, descrizione, ricevuta_file, da_estratto_conto=False):
+def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, descrizione, ricevuta_file, da_estratto_conto=False, valuta="EUR", abi=None, estratto_nome=None):
     ricevuta_nome = None
     ricevuta_percorso = None
     if ricevuta_file is not None:
@@ -258,18 +261,31 @@ def aggiungi_transazione(data, tipo, voce, importo, metodo_pagamento, persona, d
         "persona": persona if persona else None,
         "descrizione": descrizione if descrizione else None,
         "ricevuta_nome": ricevuta_nome, "ricevuta_percorso": ricevuta_percorso,
-        "da_estratto_conto": da_estratto_conto
+        "da_estratto_conto": da_estratto_conto,
+        "valuta": valuta if valuta else "EUR",
+        "abi": abi if abi else None,
+        "estratto_nome": estratto_nome if estratto_nome else None
     }
     try:
         response = supabase.table("transazioni").insert(data_inserimento).execute()
     except Exception:
+        # Fallback: se il DB non ha ancora le colonne nuove, ritenta senza
         if "da_estratto_conto" in data_inserimento:
             del data_inserimento["da_estratto_conto"]
+        if "valuta" in data_inserimento:
+            del data_inserimento["valuta"]
+        if "abi" in data_inserimento:
+            del data_inserimento["abi"]
+        if "estratto_nome" in data_inserimento:
+            del data_inserimento["estratto_nome"]
         response = supabase.table("transazioni").insert(data_inserimento).execute()
         
     if hasattr(response, 'error') and response.error:
         st.error(f"Errore: {response.error}")
         return False
+    # Restituisce l'ID della transazione creata (utile per annullare una prova)
+    if response.data and isinstance(response.data, list) and len(response.data) > 0:
+        return int(response.data[0]["id"])
     return True
 
 def ottieni_transazioni(data_inizio=None, data_fine=None):
@@ -286,6 +302,8 @@ def ottieni_transazioni(data_inizio=None, data_fine=None):
         df = pd.DataFrame(response.data)
         if 'da_estratto_conto' not in df.columns:
             df['da_estratto_conto'] = False
+        if 'valuta' not in df.columns:
+            df['valuta'] = 'EUR'
         return df
     return pd.DataFrame()
 
@@ -320,6 +338,18 @@ def carica_ultimo_estratto_conto():
             return None
     return None
 
+def elimina_transazioni_estratto(nome_estratto):
+    """Elimina solo le transazioni provenienti da uno specifico estratto conto."""
+    try:
+        resp = supabase.table("transazioni").select("id").eq("estratto_nome", nome_estratto).execute()
+        if resp.data:
+            for row_arch in resp.data:
+                supabase.table("transazioni").delete().eq("id", row_arch["id"]).execute()
+            return len(resp.data)
+    except Exception:
+        pass
+    return 0
+
 def elimina_transazione(id_transazione, percorso_ricevuta):
     if percorso_ricevuta:
         try:
@@ -333,6 +363,47 @@ def elimina_transazione(id_transazione, percorso_ricevuta):
             except Exception:
                 pass
     supabase.table("transazioni").delete().eq("id", id_transazione).execute()
+
+def salva_estratto_archivio(file_obj, nome_originale):
+    """Salva una copia dell'estratto conto caricato nell'archivio dedicato."""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        estensione = os.path.splitext(nome_originale)[1].lower()
+        nome_pulito = "".join([c if c.isalnum() or c in ['.', '_', '-'] else '_' for c in os.path.splitext(nome_originale)[0]])
+        nome_salvato = f"{timestamp}_{nome_pulito}{estensione}"
+        percorso = os.path.join(ARCHIVIO_ESTRATTI_DIR, nome_salvato)
+        with open(percorso, "wb") as f:
+            f.write(file_obj.getvalue() if hasattr(file_obj, 'getvalue') else file_obj.read())
+        return nome_salvato, percorso
+    except Exception:
+        return None, None
+
+def elenca_estratti_archivio():
+    """Restituisce la lista dei file salvati in archivio, ordinati dal più recente."""
+    if not os.path.exists(ARCHIVIO_ESTRATTI_DIR):
+        return []
+    file_estratti = [f for f in os.listdir(ARCHIVIO_ESTRATTI_DIR) if os.path.isfile(os.path.join(ARCHIVIO_ESTRATTI_DIR, f))]
+    file_estratti.sort(reverse=True)
+    return file_estratti
+
+def elimina_estratto_archivio(nome_file):
+    """Elimina un estratto conto dall'archivio."""
+    try:
+        percorso = os.path.join(ARCHIVIO_ESTRATTI_DIR, nome_file)
+        if os.path.exists(percorso):
+            os.remove(percorso)
+            return True
+    except Exception:
+        pass
+    return False
+
+def svuota_transazioni():
+    """Elimina tutte le transazioni dal database (utile per azzerare le prove)."""
+    try:
+        supabase.table("transazioni").delete().neq("id", 0).execute()
+        return True, "Tutte le transazioni sono state eliminate."
+    except Exception as e:
+        return False, f"Errore durante l'azzeramento: {str(e)}"
 
 def ottieni_categorie(tipo=None):
     query = supabase.table("categorie").select("nome")
@@ -525,6 +596,43 @@ def calcola_prossima_data(data_scadenza_input, ricorrenza):
 
     return nuova_data.strftime("%Y-%m-%d")
 
+def proponi_scadenze_da_estratti(df_estratti):
+    """Analizza i movimenti importati e propone scadenze ricorrenti future.
+
+    Rileva descrizioni che compaiono almeno 2 volte con importi simili negli
+    estratti caricati e propone di calendarizzarle come scadenza mensile.
+    """
+    if df_estratti is None or df_estratti.empty:
+        return []
+    if 'Descrizione' not in df_estratti.columns or 'Importo' not in df_estratti.columns:
+        return []
+
+    proposte = []
+    try:
+        df_usc = df_estratti[df_estratti['Tipo'] == 'Uscita'].copy()
+        if df_usc.empty:
+            return []
+        for desc, grp in df_usc.groupby('Descrizione'):
+            if pd.isna(desc) or str(desc).strip() == "":
+                continue
+            if len(grp) < 2:
+                continue
+            importi = grp['Importo'].astype(float)
+            imp_medio = importi.mean()
+            # Verifica che gli importi siano simili (tolleranza ±10%)
+            if importi.max() <= imp_medio * 1.10 and importi.min() >= imp_medio * 0.90:
+                proposte.append({
+                    "descrizione": str(desc).strip(),
+                    "importo": round(imp_medio, 2),
+                    "occorrenze": len(grp),
+                    "voce": "Pagamenti - Altro",
+                })
+    except Exception:
+        return []
+    # Ordina per occorrenze decrescenti
+    proposte.sort(key=lambda p: p["occorrenze"], reverse=True)
+    return proposte
+
 def auto_categorizza(descrizione, tipo):
     """Categorizza automaticamente una transazione in base alla descrizione e al tipo (Entrata/Uscita).
     Le macro aree sono suddivise per tipo di provenienza: accredito (Entrata) / addebito (Uscita).
@@ -572,6 +680,50 @@ def auto_categorizza(descrizione, tipo):
             return "pulizia nolmar / tutto igiene / Verona lux / Albanese group"
         if any(kw in desc_lower for kw in ["commercialista", "tempora", "consulenza contabile"]):
             return "Commercialista a tempora"
+
+        # Macro area: Pagamenti (macrocategoria con sottocategorie per società)
+        if any(kw in desc_lower for kw in ["addebito", "addebiti", "pagamento", "pagamenti", "prelievo", "prelevamento", "prel", "bonifico", "bonif", "utilizzo carta", "carta di credito", "pag maestro", "maestro", "pagamenti diversi", "rimborso"]):
+            societa_pagamenti = {
+                "telecom": "Telecom Italia",
+                "findomestic": "Findomestic",
+                "dbs": "DBS",
+                "allianz": "Allianz",
+                "telepass": "Telepass",
+                "inps": "INPS",
+                "enel": "Enel",
+                "fastweb": "Fastweb",
+                "vodafone": "Vodafone",
+                "wind": "Wind",
+                "tiscali": "Tiscali",
+                "riccardo debenedetti": "Riccardo DeBenedetti",
+                "larocca": "La Rocca",
+                "pittarosso": "Pittarosso",
+                "mediaworld": "Mediaworld",
+                "bricocenter": "Bricocenter",
+                "bricoman": "Bricoman",
+                "action": "Action",
+                "lidl": "Lidl",
+                "aldi": "Aldi",
+                "kfc": "KFC",
+                "burger king": "Burger King",
+                "mc donald": "McDonald's",
+                "mcdonald": "McDonald's",
+                "supermercati martinelli": "Supermercati Martinelli",
+                "pettrolitalia": "Petrolitalia",
+                "petrolitalia": "Petrolitalia",
+                "farmacia": "Farmacia",
+                "md": "MD",
+                "eurospin": "Eurospin",
+                "unigross": "Unigross",
+                "naum": "NaturaSi",
+                "amazon": "Amazon",
+                "sumup": "SumUp",
+            }
+            for key, label in societa_pagamenti.items():
+                if key in desc_lower:
+                    return f"Pagamenti - {label}"
+            return "Pagamenti - Altro"
+
         return "Altro (Uscita)"
 
 def ottieni_scadenze(stato=None):
@@ -930,14 +1082,14 @@ if pagina == "Nuova registrazione":
 # ─── PAGINA: CARICA ESTRATTO CONTO ─────────────────────────
 elif pagina == "Carica Estratto Conto":
     st.markdown("### :material/upload_file: Carica & Analizza Estratto Conto")
-    st.caption("Carica il tuo estratto conto bancario in formato **Excel (.xlsx, .xls)** o **CSV (.csv)** per analizzare, categorizzare automaticamente e importare le transazioni nel database.")
-    st.caption("💡 **Nota:** Se hai un file PDF, esportalo come Excel o CSV dal tuo home banking, oppure usa la pagina *Nuova registrazione* per inserire manualmente le transazioni.")
+    st.caption("Carica il tuo estratto conto bancario in formato **Excel (.xlsx, .xls)**, **CSV (.csv)** o **PDF (.pdf)** per analizzare, categorizzare automaticamente e importare le transazioni nel database.")
+    st.caption("💡 **Nota:** I PDF degli estratti conto vengono letti automaticamente e ripuliti dalle righe superflue (intestazioni, saldi, dettagli tecnici). Puoi anche caricare Excel o CSV.")
 
     # ─── GUIDA INLINE ESTRATTO CONTO ─────────────────────
     with st.expander("📖 **Guida rapida: come usare l'Estratto Conto**", expanded=False):
         st.markdown("""
 **Passo 1 — Carica il file**  
-Carica il file dell'estratto conto in formato **Excel (.xlsx, .xls)** o **CSV (.csv)**.  
+Carica il file dell'estratto conto in formato **Excel (.xlsx, .xls)**, **CSV (.csv)** o **PDF (.pdf)**.  
 Vedrai uno spinner *"Caricamento del file in corso..."* e poi il messaggio *"✅ File caricato con successo!"*.
 
 **Passo 2 — Seleziona le colonne**  
@@ -964,11 +1116,53 @@ Controlla i totali entrate/uscite e inserisci il **saldo iniziale e finale** del
 
 **Passo 6 — Modifica e importa**  
 Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infine premere **"Importa Transazioni Selezionate"** per salvarle nel database.
+
+**Passo 7 — Hai fatto una prova? Annulla tutto in un colpo**  
+Dopo un'importazione di prova trovi il pulsante **"🗑️ Elimina le transazioni appena importate"**: elimina dal database tutte le transazioni caricate in quell'operazione. Usa **"Pulisci ed esegui un nuovo caricamento"** per svuotare il campo file e ripartire.
+
+**Dove vedi le categorie assegnate in automatico?**  
+Le voci (categorie) assegnate restano visibili **sempre**: nel tab *Modifica e Valida* prima dell'importazione, e dopo l'importazione nelle pagine *Resoconto & analisi* e *Archivio pagamenti* (colonna **Voce**). Le categorie ordinate per tipo le trovi anche in *Gestione categorie*.
 """)
 
-    file_caricato = st.file_uploader("Seleziona il file dell'estratto conto", type=["xlsx", "xls", "csv"])
+    st.session_state.setdefault("ec_uploader_key", 0)
+    file_caricato = st.file_uploader(
+        "Seleziona il file dell'estratto conto",
+        type=["xlsx", "xls", "csv", "pdf"],
+        key=f"ec_uploader_{st.session_state['ec_uploader_key']}"
+    )
 
     if file_caricato is not None:
+        # Salva SEMPRE una copia del file nell'archivio estratti conto
+        # (prima del parsing: anche se il PDF è scansionato/illeggibile la copia resta)
+        nome_archivio_salvato, _ = salva_estratto_archivio(file_caricato, file_caricato.name)
+        if nome_archivio_salvato:
+            st.caption(f"🗂️ Copia conservata nell'**Archivio Estratti Conto**. Il file originale resta salvato come PDF.")
+        # Pulsante sempre visibile per rimuovere il file caricato e ripartire
+        if st.button("🗑️ Rimuovi il file caricato e riparti", use_container_width=True, type="secondary"):
+            st.session_state["ec_uploader_key"] = st.session_state.get("ec_uploader_key", 0) + 1
+            st.rerun()
+        # Se sono state importate transazioni come prova, offri di eliminarle subito
+        ultimi_ids_rim = st.session_state.get("ec_ultimi_ids_importati", [])
+        if ultimi_ids_rim:
+            n_importate = st.session_state.get("ec_ultimo_import_successi", len(ultimi_ids_rim))
+            st.warning(f"⚠️ Hai importato **{n_importate} transazioni** da questo estratto conto: restano nel database anche se rimuovi il file.")
+            col_rim1, col_rim2 = st.columns(2)
+            with col_rim1:
+                if st.button("🗑️ Elimina le transazioni importate (annulla prova)", use_container_width=True, type="secondary"):
+                    eliminati_rim = 0
+                    for id_tx_rim in ultimi_ids_rim:
+                        try:
+                            elimina_transazione(id_tx_rim, None)
+                            eliminati_rim += 1
+                        except Exception:
+                            pass
+                    st.session_state.pop("ec_ultimi_ids_importati", None)
+                    st.session_state.pop("ec_ultimo_import_successi", None)
+                    st.success(f"🗑️ {eliminati_rim} transazioni eliminate dal database.")
+                    st.rerun()
+            with col_rim2:
+                st.caption("💡 Oppure usa **Azzeramento dati** in *Backup & Ripristino* per svuotare tutto.")
+        st.divider()
         # Se è stato caricato un file diverso dal precedente, azzera la mappatura
         # delle colonne salvata (evita che il formato di un file precedente
         # "blocchi" la selezione delle colonne del nuovo file).
@@ -982,35 +1176,44 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
             estensione = nome_file.split('.')[-1] if '.' in nome_file else ''
 
             
-            with st.spinner("⏳ Caricamento del file in corso..."):
-                if estensione == 'csv':
-                    # Leggi file CSV con rilevamento automatico del separatore
-                    import csv as csv_module
-                    contenuto = file_caricato.getvalue().decode('utf-8', errors='replace')
-                    # Rileva il separatore (virgola, punto e virgola, tab)
-                    try:
-                        dialetto = csv_module.Sniffer().sniff(contenuto[:2048], delimiters=',;\t')
-                        separatore = dialetto.delimiter
-                    except Exception:
-                        separatore = ';'  # Default per file italiani
-                    
-                    df_excel = pd.read_csv(io.BytesIO(file_caricato.getvalue()), sep=separatore, encoding='utf-8', on_bad_lines='skip')
-                    foglio_selezionato = "CSV"
-                else:
-                    # Leggi file Excel
-                    excel_file = pd.ExcelFile(file_caricato)
-                    nomi_fogli = excel_file.sheet_names
-                    
-                    # Seleziona foglio se ce n'è più di uno
-                    if len(nomi_fogli) > 1:
-                        foglio_selezionato = st.selectbox("Seleziona il foglio di lavoro:", nomi_fogli)
+            if estensione == 'pdf':
+                with st.spinner("⏳ Lettura ed estrazione del PDF in corso... potrebbero volerci alcuni secondi"):
+                    df_excel = pdf_a_dataframe(io.BytesIO(file_caricato.getvalue()))
+                foglio_selezionato = "PDF"
+            else:
+                with st.spinner("⏳ Lettura del file in corso..."):
+                    if estensione == 'csv':
+                        # Leggi file CSV con rilevamento automatico del separatore
+                        import csv as csv_module
+                        contenuto = file_caricato.getvalue().decode('utf-8', errors='replace')
+                        # Rileva il separatore (virgola, punto e virgola, tab)
+                        try:
+                            dialetto = csv_module.Sniffer().sniff(contenuto[:2048], delimiters=',;\t')
+                            separatore = dialetto.delimiter
+                        except Exception:
+                            separatore = ';'  # Default per file italiani
+                        
+                        df_excel = pd.read_csv(io.BytesIO(file_caricato.getvalue()), sep=separatore, encoding='utf-8', on_bad_lines='skip')
+                        foglio_selezionato = "CSV"
                     else:
-                        foglio_selezionato = nomi_fogli[0]
-                    
-                    # Leggi il file
-                    df_excel = pd.read_excel(file_caricato, sheet_name=foglio_selezionato)
+                        # Leggi file Excel
+                        excel_file = pd.ExcelFile(file_caricato)
+                        nomi_fogli = excel_file.sheet_names
+                        
+                        # Seleziona foglio se ce n'è più di uno
+                        if len(nomi_fogli) > 1:
+                            foglio_selezionato = st.selectbox("Seleziona il foglio di lavoro:", nomi_fogli)
+                        else:
+                            foglio_selezionato = nomi_fogli[0]
+                        
+                        # Leggi il file
+                        df_excel = pd.read_excel(file_caricato, sheet_name=foglio_selezionato)
             
-            st.success(f"✅ File **{file_caricato.name}** caricato con successo! ({len(df_excel)} righe rilevate)")
+            st.success(f"✅ **Caricamento completato!** File **{file_caricato.name}** letto correttamente: **{len(df_excel)} righe** rilevate.")
+            try:
+                st.toast(f"✅ Caricamento completato: {len(df_excel)} righe da {file_caricato.name}", icon="✅")
+            except Exception:
+                pass
             
             st.markdown("#### :material/preview: Anteprima del file caricato")
             st.caption("Ecco le prime 10 righe del file. Seleziona le colonne corrispondenti qui sotto.")
@@ -1052,6 +1255,10 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                     "col_importo_uscita": col_importo_uscita,
                     "metodo_predefinito": metodo_predefinito,
                     "persona_predefinita": persona_predefinita,
+                    "col_valuta": col_valuta,
+                    "valuta_predefinita": valuta_predefinita,
+                    "col_abi": col_abi,
+                    "abi_predefinito": abi_predefinito,
                 }
             
             # Recupera la mappatura salvata (se presente)
@@ -1101,6 +1308,8 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                     col_imp_ent_prev = mappatura_salvata["col_importo_entrata"]
                 if mappatura_salvata.get("col_importo_uscita") in colonne_disponibili:
                     col_imp_usc_prev = mappatura_salvata["col_importo_uscita"]
+                if mappatura_salvata.get("col_valuta") in colonne_disponibili:
+                    col_valuta_prev = mappatura_salvata["col_valuta"]
             
             with col_sc1:
                 col_data = st.selectbox("Colonna Data:", colonne_disponibili, index=colonne_disponibili.index(col_data_prev) if col_data_prev in colonne_disponibili else 0)
@@ -1129,7 +1338,21 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                 metodo_predefinito = st.selectbox("Metodo di pagamento predefinito:", METODI_PAGAMENTO, index=METODI_PAGAMENTO.index(mappatura_salvata.get("metodo_predefinito")) if mappatura_salvata.get("metodo_predefinito") in METODI_PAGAMENTO else (METODI_PAGAMENTO.index("Bonifico") if "Bonifico" in METODI_PAGAMENTO else 0))
             with col_pers_def:
                 persona_predefinita = st.text_input("Persona / Ente predefinito (opzionale):", value=mappatura_salvata.get("persona_predefinita", ""), placeholder="Es. Banca, Fornitore...")
-            
+
+            col_valuta_def1, col_valuta_def2 = st.columns(2)
+            with col_valuta_def1:
+                col_valuta_prev = trova_colonna(["valuta", "currency", "divisa"], df_excel.columns)
+                col_valuta = st.selectbox("Colonna Valuta (opzionale):", colonne_disponibili, index=colonne_disponibili.index(col_valuta_prev) if col_valuta_prev in colonne_disponibili else 0)
+            with col_valuta_def2:
+                valuta_predefinita = st.text_input("Valuta predefinita (opzionale):", value=mappatura_salvata.get("valuta_predefinita", "EUR"), placeholder="EUR")
+
+            col_abi_def1, col_abi_def2 = st.columns(2)
+            with col_abi_def1:
+                col_abi_prev = trova_colonna(["abi", "cab", "codice abi"], df_excel.columns)
+                col_abi = st.selectbox("Colonna ABI (opzionale):", colonne_disponibili, index=colonne_disponibili.index(col_abi_prev) if col_abi_prev in colonne_disponibili else 0, help="Presente solo su alcuni estratti conto: se non c'è, lascia vuoto.")
+            with col_abi_def2:
+                abi_predefinito = st.text_input("ABI predefinito (opzionale):", value=mappatura_salvata.get("abi_predefinito", ""), placeholder="Es. 02008")
+
             # Salva la mappatura delle colonne selezionate per i prossimi caricamenti
             salva_mappatura_colonne()
 
@@ -1234,7 +1457,27 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                     # Categorizzazione automatica
                     desc_str = str(val_desc).strip()
                     voce_automatica = auto_categorizza(desc_str, tipo_val)
-                    
+
+                    # Valuta: dalla colonna selezionata (se presente) oppure valore predefinito
+                    try:
+                        if col_valuta:
+                            val_raw = row[col_valuta]
+                            valuta_riga = str(val_raw).strip().upper() if not pd.isna(val_raw) and str(val_raw).strip() else (valuta_predefinita or "EUR")
+                        else:
+                            valuta_riga = (valuta_predefinita or "EUR").strip().upper()
+                    except Exception:
+                        valuta_riga = (valuta_predefinita or "EUR").strip().upper()
+
+                    # ABI: opzionale, dalla colonna se presente o valore predefinito
+                    try:
+                        if col_abi:
+                            abi_raw = row[col_abi]
+                            abi_riga = str(abi_raw).strip() if not pd.isna(abi_raw) and str(abi_raw).strip() else (abi_predefinito or "")
+                        else:
+                            abi_riga = (abi_predefinito or "").strip()
+                    except Exception:
+                        abi_riga = (abi_predefinito or "").strip()
+
                     transazioni_elaborate.append({
                         "Importa": True,
                         "Data": data_parsed,
@@ -1243,14 +1486,49 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                         "Importo": importo_val,
                         "Metodo": metodo_predefinito,
                         "Persona": persona_predefinita if persona_predefinita else "",
-                        "Descrizione": desc_str
+                        "Descrizione": desc_str,
+                        "Valuta": valuta_riga,
+                        "Abi": abi_riga
                     })
                 
                 if not transazioni_elaborate:
                     st.error("Nessuna riga valida trovata nel file Excel con i criteri selezionati.")
                 else:
                     df_elaborato = pd.DataFrame(transazioni_elaborate)
-                    
+
+                    # Garantisce che le categorie auto-generate (es. "Pagamenti - X") esistano nel DB
+                    for idx_gar, row_gar in df_elaborato.iterrows():
+                        try:
+                            aggiungi_categoria(row_gar['Tipo'], row_gar['Voce'])
+                        except Exception:
+                            pass
+
+                    # ─── PROPOSTA AUTOMATICA SCADENZE FUTURE ─────────────────
+                    proposte_scadenze = proponi_scadenze_da_estratti(df_elaborato)
+                    if proposte_scadenze:
+                        st.markdown("#### :material/calendar_clock: Proposta scadenze ricorrenti dall'estratto conto")
+                        st.caption("Rilevate uscite che si ripetono con importi simili: puoi calendarizzarle come scadenze mensili future.")
+                        df_proposte = pd.DataFrame(proposte_scadenze)
+                        st.dataframe(df_proposte[['descrizione', 'importo', 'occorrenze']], hide_index=True, width='stretch')
+                        if st.button("📅 Crea le scadenze proposte (mensile)", type="secondary"):
+                            create_count = 0
+                            for pr in proposte_scadenze:
+                                try:
+                                    ok_sc, _ = aggiungi_scadenza(
+                                        pr["descrizione"], "Uscita", pr["voce"], pr["importo"],
+                                        (date.today() + timedelta(days=30)).strftime("%Y-%m-%d"),
+                                        "Mensile", metodo_predefinito, persona_predefinita if persona_predefinita else "", ""
+                                    )
+                                    if ok_sc:
+                                        create_count += 1
+                                except Exception:
+                                    pass
+                            if create_count > 0:
+                                st.success(f"✅ {create_count} scadenze mensili create! Le trovi in *Scadenzario & Promemoria*.")
+                                st.rerun()
+                            else:
+                                st.warning("Nessuna scadenza creata (probabilmente già esistenti).")
+
                     # Rilevamento duplicati automatico
                     st.markdown("#### :material/analytics: Analisi e Categorizzazione Automatica")
                     
@@ -1486,7 +1764,9 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                             "Importo": st.column_config.NumberColumn("Importo (EUR)", format="%.2f"),
                             "Metodo": st.column_config.SelectboxColumn("Metodo", options=METODI_PAGAMENTO),
                             "Persona": st.column_config.TextColumn("Persona / Fornitore"),
-                            "Descrizione": st.column_config.TextColumn("Descrizione / Causale", width="large")
+                            "Descrizione": st.column_config.TextColumn("Descrizione / Causale", width="large"),
+                            "Valuta": st.column_config.TextColumn("Valuta"),
+                            "Abi": st.column_config.TextColumn("ABI")
                         },
                         hide_index=True,
                         use_container_width=True,
@@ -1500,6 +1780,7 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                             st.warning("Nessuna transazione selezionata per l'importazione.")
                         else:
                             success_count = 0
+                            ids_importati = []
                             progress_text = "Salvataggio nel database in corso..."
                             my_bar = st.progress(0, text=progress_text)
                             
@@ -1507,7 +1788,7 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                             for i, (_, row_imp) in enumerate(df_da_importare.iterrows()):
                                 # Esegui inserimento
                                 data_str = row_imp['Data'].strftime("%Y-%m-%d") if isinstance(row_imp['Data'], (date, datetime)) else str(row_imp['Data'])
-                                ok = aggiungi_transazione(
+                                esito = aggiungi_transazione(
                                     data_str,
                                     row_imp['Tipo'],
                                     row_imp['Voce'],
@@ -1515,19 +1796,111 @@ Puoi **modificare** categorie, metodi o descrizioni, deselezionare righe e infin
                                     row_imp['Metodo'],
                                     row_imp['Persona'],
                                     row_imp['Descrizione'],
-                                    None # Nessun file ricevuta
+                                    None, # Nessun file ricevuta
+                                    valuta=row_imp.get('Valuta', 'EUR'),
+                                    abi=row_imp.get('Abi') or None,
+                                    estratto_nome=nome_archivio_salvato
                                 )
-                                if ok:
+                                if esito:
                                     success_count += 1
+                                    if not isinstance(esito, bool):
+                                        ids_importati.append(int(esito))
                                 my_bar.progress((i + 1) / tot_righe, text=f"Importati {i+1}/{tot_righe} movimenti...")
                                 
                             my_bar.empty()
+                            st.session_state["ec_ultimi_ids_importati"] = ids_importati
+                            st.session_state["ec_ultimo_import_successi"] = success_count
                             st.success(f"✅ Importazione completata! {success_count} su {tot_righe} transazioni sono state caricate con successo nel database.")
                             st.balloons()
-                            # Reset file uploader / rerun per aggiornare l'applicazione
-                            st.button("Pulisci ed esegui un nuovo caricamento", on_click=lambda: st.rerun())
+                    
+                    # Annulla la prova: elimina le transazioni appena importate
+                    ultimi_ids = st.session_state.get("ec_ultimi_ids_importati", [])
+                    if ultimi_ids:
+                        st.warning(f"ℹ️ Hai importato {st.session_state.get('ec_ultimo_import_successi', len(ultimi_ids))} transazioni come prova: puoi eliminarle tutte in un colpo solo.")
+                        col_annulla1, col_annulla2 = st.columns(2)
+                        with col_annulla1:
+                            if st.button("🗑️ Elimina le transazioni appena importate (annulla la prova)", type="secondary", use_container_width=True):
+                                eliminati = 0
+                                for id_tx in ultimi_ids:
+                                    try:
+                                        elimina_transazione(id_tx, None)
+                                        eliminati += 1
+                                    except Exception:
+                                        pass
+                                st.session_state.pop("ec_ultimi_ids_importati", None)
+                                st.session_state.pop("ec_ultimo_import_successi", None)
+                                st.success(f"🗑️ Prova annullata! {eliminati} transazioni eliminate dal database.")
+                                st.rerun()
+                        with col_annulla2:
+                            if st.button("Pulisci ed esegui un nuovo caricamento", use_container_width=True):
+                                st.session_state["ec_uploader_key"] = st.session_state.get("ec_uploader_key", 0) + 1
+                                st.rerun()
         except Exception as e:
             st.error(f"Errore durante la lettura del file Excel: {str(e)}")
+
+# ─── PAGINA: ARCHIVIO ESTRATTI CONTO ───────────────────────
+elif pagina == "Archivio Estratti Conto":
+    st.markdown("### :material/folder_open: Archivio Estratti Conto")
+    st.caption("Consulta tutti gli estratti conto caricati nel tempo, scaricali o eliminali.")
+
+    file_estratti = elenca_estratti_archivio()
+    if not file_estratti:
+        st.info(":material/info: Nessun estratto conto in archivio. Carica il primo nella pagina *Carica Estratto Conto*.")
+    else:
+        st.markdown(f"**{len(file_estratti)} estratti conto in archivio**")
+        for nome_arch in file_estratti:
+            percorso_arch = os.path.join(ARCHIVIO_ESTRATTI_DIR, nome_arch)
+            try:
+                dimensione_kb = os.path.getsize(percorso_arch) / 1024
+            except Exception:
+                dimensione_kb = 0
+            # Data dal nome file (timestamp iniziale YYYYMMDD_HHMMSS)
+            data_arch = "N/D"
+            try:
+                parte_data = nome_arch.split("_")[0]
+                if len(parte_data) == 8 and parte_data.isdigit():
+                    data_arch = f"{parte_data[6:8]}/{parte_data[4:6]}/{parte_data[0:4]}"
+            except Exception:
+                pass
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([4, 1, 1])
+                with c1:
+                    st.markdown(f"**{nome_arch}**")
+                    st.caption(f"🗓️ Caricato il: {data_arch} • {dimensione_kb:.1f} KB")
+                with c2:
+                    try:
+                        with open(percorso_arch, "rb") as f_arch:
+                            dati_estr = f_arch.read()
+                        st.download_button(
+                            ":material/download: Scarica",
+                            data=dati_estr,
+                            file_name=nome_arch,
+                            key=f"dl_estratto_{nome_arch}",
+                            use_container_width=True
+                        )
+                    except Exception:
+                        st.warning("File non leggibile")
+                with c3:
+                    # Eliminazione con scelta: solo copia fisica, oppure copia + transazioni importate
+                    with st.popover(":material/delete: Elimina", use_container_width=True):
+                        st.markdown("##### 🗑️ Elimina estratto conto")
+                        st.caption("Scegli cosa eliminare:")
+                        if st.button("🗂️ Solo la copia fisica (le transazioni restano)", key=f"del_estratto_solo_{nome_arch}", use_container_width=True, type="secondary"):
+                            if elimina_estratto_archivio(nome_arch):
+                                st.success(f"🗑️ Copia '{nome_arch}' eliminata dall'archivio. Le transazioni nel database NON sono state toccate.")
+                                st.rerun()
+                            else:
+                                st.error("Errore durante l'eliminazione.")
+                        n_tx_estratto = elimina_transazioni_estratto(nome_arch)
+                        if st.button(f"🗑️ Copia + elimina {n_tx_estratto} transazioni di questo estratto (restano le altre)", key=f"del_estratto_tutte_{nome_arch}", use_container_width=True, type="secondary"):
+                            if elimina_estratto_archivio(nome_arch):
+                                eliminati_arch = elimina_transazioni_estratto(nome_arch)
+                                st.session_state.pop("ec_ultimi_ids_importati", None)
+                                st.session_state.pop("ec_ultimo_import_successi", None)
+                                st.success(f"🗑️ Copia eliminata e {eliminati_arch} transazioni di '{nome_arch}' rimosse dal database.")
+                                st.rerun()
+                            else:
+                                st.error("Errore durante l'eliminazione.")
 
 # ─── PAGINA: PRENOTAZIONI & OSPITI ─────────────────────────
 elif pagina == "Prenotazioni & Ospiti":
@@ -2014,14 +2387,24 @@ elif pagina == "Resoconto & analisi":
         with tab_lista:
             st.markdown("#### Transazioni del periodo")
             df_display = df_transazioni.copy()
-            df_display.columns = ['ID', 'Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Metodo', 'Persona', 'Descrizione', 'Ricevuta', 'Percorso', 'Creato']
+            colonne_display = {
+                'id': 'ID', 'data': 'Data', 'tipo': 'Tipo', 'voce': 'Voce',
+                'importo': 'Importo (EUR)', 'metodo_pagamento': 'Metodo',
+                'persona': 'Persona', 'descrizione': 'Descrizione',
+                'ricevuta_nome': 'Ricevuta', 'ricevuta_percorso': 'Percorso',
+                'da_estratto_conto': 'Da Estratto', 'valuta': 'Valuta',
+                'abi': 'ABI', 'created_at': 'Creato'
+            }
+            colonne_presenti = [c for c in colonne_display if c in df_display.columns]
+            df_display = df_display[colonne_presenti]
+            df_display.columns = [colonne_display[c] for c in colonne_presenti]
             
             def color_tipo(val):
                 if val == 'Entrata':
                     return 'color: #16A34A; font-weight: 600;'
                 return 'color: #DC2626; font-weight: 600;'
             
-            styled = df_display[['Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Metodo', 'Persona', 'Descrizione', 'Ricevuta']].style.map(
+            styled = df_display[['Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Valuta', 'Metodo', 'Persona', 'Descrizione', 'Ricevuta']].style.map(
                 color_tipo, subset=['Tipo']
             ).format({'Importo (EUR)': '{:,.2f}'})
             
@@ -2046,7 +2429,7 @@ elif pagina == "Resoconto & analisi":
                         st.write(f"- **Data:** {mov['data']}")
                         st.write(f"- **Da chi:** {mov.get('persona') or 'N/D'}")
                         st.write(f"- **Voce:** {mov['voce']}")
-                        st.write(f"- **Importo:** {mov['importo']:.2f} EUR")
+                        st.write(f"- **Importo:** {mov['importo']:.2f} {mov.get('valuta', 'EUR')}")
                         st.write(f"- **Metodo:** {mov.get('metodo_pagamento', 'N/D')}")
                         st.write(f"- **Note:** {mov['descrizione'] or 'Nessuna'}")
                         if mov['ricevuta_nome']:
@@ -2087,6 +2470,42 @@ elif pagina == "Resoconto & analisi":
                         su.columns = ['Voce', 'Totale (EUR)']
                         st.dataframe(su, width='stretch', hide_index=True)
                         st.bar_chart(data=su, x='Voce', y='Totale (EUR)', color="#DC2626")
+
+            st.markdown("#### :material/label: Totali e movimenti per Descrizione (sempre visibili)")
+            st.caption("Per ogni descrizione diversa: totale del periodo e elenco dei singoli movimenti che la compongono, sia per le entrate che per le uscite.")
+
+            def mostra_raggruppamento_descrizione(df_parz, label, colore):
+                """Mostra per ogni descrizione il totale e i movimenti che la compongono."""
+                if df_parz.empty:
+                    st.info(f"Nessuna {label.lower()} nel periodo.")
+                    return
+                df_sorted = df_parz.sort_values('importo', ascending=False)
+                descrizioni_tot = df_sorted.groupby('descrizione')['importo'].sum().sort_values(ascending=False)
+                for desc_grp, tot_grp in descrizioni_tot.items():
+                    if pd.isna(desc_grp) or str(desc_grp).strip() == "":
+                        continue
+                    df_righe = df_sorted[df_sorted['descrizione'] == desc_grp]
+                    with st.expander(f"**{desc_grp}** — Totale **{tot_grp:,.2f} EUR** ({len(df_righe)} movimenti)"):
+                        righe_disp = df_righe[['data', 'tipo', 'voce', 'importo', 'valuta', 'metodo_pagamento']].copy()
+                        righe_disp.columns = ['Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Valuta', 'Metodo']
+                        st.dataframe(
+                            righe_disp.style.map(
+                                lambda v: f'color: {colore}; font-weight: 600;' if v == 'Entrata' else f'color: #DC2626; font-weight: 600;',
+                                subset=['Tipo']
+                            ).format({'Importo (EUR)': '{:,.2f}'}),
+                            hide_index=True,
+                            width='stretch'
+                        )
+
+            cdl1, cdl2 = st.columns(2)
+            with cdl1:
+                with st.container(border=True):
+                    st.markdown("##### :material/trending_up: Entrate per Descrizione")
+                    mostra_raggruppamento_descrizione(df_entrate, "Entrate", "#16A34A")
+            with cdl2:
+                with st.container(border=True):
+                    st.markdown("##### :material/trending_down: Uscite per Descrizione")
+                    mostra_raggruppamento_descrizione(df_uscite, "Uscite", "#16A34A")
         
         with tab_metodi:
             st.markdown("#### Totali per metodo di pagamento")
@@ -2317,8 +2736,8 @@ elif pagina == "Archivio pagamenti":
         st.markdown(f"**{len(df_pag_filtrate)} pagamenti trovati**")
         
         # Mostra tabella
-        df_display_p = df_pag_filtrate[['data', 'tipo', 'voce', 'importo', 'metodo_pagamento', 'persona', 'descrizione']].copy()
-        df_display_p.columns = ['Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Metodo', 'Persona', 'Descrizione']
+        df_display_p = df_pag_filtrate[['data', 'tipo', 'voce', 'importo', 'valuta', 'metodo_pagamento', 'persona', 'descrizione']].copy()
+        df_display_p.columns = ['Data', 'Tipo', 'Voce', 'Importo (EUR)', 'Valuta', 'Metodo', 'Persona', 'Descrizione']
         
         def color_tipo_p(val):
             if val == 'Entrata':
@@ -2372,9 +2791,10 @@ elif pagina == "Backup & Ripristino":
     st.markdown("### :material/save: Backup & Ripristino")
     st.caption("Crea backup manuali dei dati, scaricali e ripristina quando necessario.")
     
-    tab_backup, tab_ripristino = st.tabs([
+    tab_backup, tab_ripristino, tab_azzeramento = st.tabs([
         ":material/save: Crea Backup",
-        ":material/restore: Ripristina"
+        ":material/restore: Ripristina",
+        ":material/delete_forever: Azzeramento dati"
     ])
     
     with tab_backup:
@@ -2467,6 +2887,21 @@ elif pagina == "Backup & Ripristino":
                 except Exception as e:
                     st.error(f"Errore lettura backup: {str(e)}")
 
+    with tab_azzeramento:
+        st.markdown("#### :material/delete_forever: Azzeramento dati (prove)")
+        st.caption("Elimina tutte le transazioni in un colpo solo, utile per azzerare le prove fatte con gli estratti conto.")
+        st.warning("⚠️ **Attenzione:** questa operazione cancella TUTTE le transazioni dal database ed è irreversibile. Le categorie e le scadenze NON vengono toccate.")
+        conferma_svuota = st.checkbox("Ho letto l'avviso e voglio eliminare TUTTE le transazioni.", key="conferma_svuota")
+        if st.button("🧹 Svuota tutto (azzeramento dati)", type="secondary", use_container_width=True, disabled=not conferma_svuota):
+            ok_sv, msg_sv = svuota_transazioni()
+            if ok_sv:
+                st.session_state.pop("ec_ultimi_ids_importati", None)
+                st.session_state.pop("ec_ultimo_import_successi", None)
+                st.success(f"✅ {msg_sv}")
+                st.rerun()
+            else:
+                st.error(msg_sv)
+
 # ─── PAGINA: GUIDA ─────────────────────────────────────────
 elif pagina == "Guida":
     st.markdown("### :material/menu_book: Guida all'uso")
@@ -2530,7 +2965,7 @@ Dopo aver compilato i campi, premi **"Registra movimento"** per salvare.
         st.write("""
 Questa funzione ti permette di **importare automaticamente** le transazioni dal tuo estratto conto bancario.
 
-**Formati supportati:** Excel (`.xlsx`, `.xls`) e CSV (`.csv`).
+**Formati supportati:** Excel (`.xlsx`, `.xls`), CSV (`.csv`) e PDF (`.pdf`).
 
 **Come funziona:**
 1. **Carica il file** dell'estratto conto
@@ -2548,7 +2983,7 @@ Questa funzione ti permette di **importare automaticamente** le transazioni dal 
 - 🏷️ **Categorizzazione automatica** — l'app riconosce bollette, affitti, stipendi, F24, ecc.
 - 📊 **Grafici** — suddivisione spese per categoria e dettaglio utenze
 """)
-        st.warning("💡 **Nota:** Se hai un file PDF, esportalo come Excel o CSV dal tuo home banking prima di caricarlo.")
+        st.warning("💡 **Nota:** I PDF vengono letti automaticamente: intestazioni ripetute, saldi di periodo e dettagli tecnici (IBAN, numeri mandato/carta) vengono rimossi dalle descrizioni.")
 
     # ── PRENOTAZIONI & OSPITI ──
     with guida_tab[3]:
@@ -2697,6 +3132,26 @@ L'app richiede un **login**. Le credenziali vengono configurate nel file `dev_se
 o nei secrets di Streamlit Cloud. Se non configurato, le credenziali predefinite sono **admin/admin**.
 """)
 
+        with st.expander("🚪 Come faccio il logout?"):
+            st.write("""
+Nella **barra laterale** a sinistra, in fondo, c'è il pulsante **":material/logout: Esci"**: premilo per
+terminare la sessione. Dovrai reinserire le credenziali al prossimo accesso.
+""")
+
+        with st.expander("🗃️ Come elimino le transazioni di UN SOLO estratto conto senza toccare le altre?"):
+            st.write("""
+1. Vai in **Archivio Estratti Conto**.
+2. Accanto al file che ti interessa premi **"Elimina"**.
+3. Nel menu scegli **"Copia + elimina N transazioni di questo estratto"**:
+   vengono rimosse dal database **solo le transazioni importate da quel file**, le altre restano.
+   
+Funziona anche dopo il logout perché ogni transazione ricorda la propria origine (`estratto_nome`),
+e la colonna va aggiunta al database con:
+```sql
+ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS estratto_nome TEXT;
+```
+""")
+
         with st.expander("☁️ Dove vengono salvati i dati?"):
             st.write("""
 Tutti i dati (transazioni, categorie, scadenze, prenotazioni) vengono salvati su **Supabase**, un database cloud.
@@ -2705,14 +3160,77 @@ Le **ricevute** vengono caricate su Supabase Storage (con fallback locale). I **
 
         with st.expander("📥 Come importo un estratto conto in PDF?"):
             st.write("""
-L'app non legge direttamente i PDF. **Esporta il PDF come Excel o CSV** dal tuo home banking,
-poi carica il file nella pagina *Carica Estratto Conto*.
+L'app ora legge direttamente i **PDF** degli estratti conto: caricali nella pagina *Carica Estratto Conto*.
+In alternativa, puoi esportare il PDF come **Excel o CSV** dal tuo home banking.
+""")
+
+        with st.expander("🗑️ Posso eliminare solo un estratto conto o solo determinate voci?"):
+            st.write("""
+Sì, puoi eliminare in quattro modi distinti:
+
+- **Eliminare un singolo estratto conto dalla copia archivio:** vai in **Archivio Estratti Conto** → premi **"Elimina"** accanto al file. Le transazioni importate nel database NON vengono toccate.
+- **Eliminare una singola transazione:** vai in **Resoconto & analisi** → tab *Lista transazioni* → seleziona il movimento → **"Elimina movimento"**.
+- **Eliminare tutte le transazioni appena importate (annulla prova):** nella pagina *Carica Estratto Conto* compare il pulsante **"🗑️ Elimina le transazioni importate"**.
+- **Eliminare tutte le transazioni:** vai in **Backup & Ripristino** → tab *Azzeramento dati*.
+""")
+
+        with st.expander("🗑️ Ho importato per sbaglio (prova). Come elimino tutto?"):
+            st.write("""
+Dopo ogni importazione compare il pulsante **"🗑️ Elimina le transazioni appena importate (annulla la prova)"**:
+elimina in un colpo solo tutte le transazioni appena caricate nel database.
+
+Se invece hai importato in sessioni diverse o vuoi eliminare movimenti singoli:
+- Vai in **Resoconto & analisi** → seleziona il movimento → **"Elimina movimento"**.
+""")
+
+        with st.expander("📄 Dove finisce la copia del mio estratto conto PDF?"):
+            st.write("""
+Ogni file caricato viene **salvato automaticamente come copia** nell'**Archivio Estratti Conto** (cartella `estratti_conto_archivio/`), anche se il parsing non riesce.
+Così il tuo PDF non viene mai perso: puoi scaricarlo in qualsiasi momento dalla pagina apposita.
+""")
+
+        with st.expander("📊 Le categorie assegnate in automatico si vedono sempre?"):
+            st.write("""
+Sì. Le **voci (categorie)** assegnate automaticamente dall'estratto conto:
+- sono visibili e **modificabili** nel tab *Modifica e Valida* prima dell'importazione;
+- dopo l'importazione restano salvate nel database e le ritrovi in **Resoconto & analisi** e **Archivio pagamenti** (colonna **Voce**);
+- l'elenco delle categorie per tipo è disponibile in **Gestione categorie**.
 """)
 
         with st.expander("🔄 Come funzionano le scadenze ricorrenti?"):
             st.write("""
 Quando registri una scadenza con una **ricorrenza** (es. Mensile), dopo averla segnata come pagata
 l'app calcola automaticamente la **prossima data** e la imposta come nuova scadenza in attesa.
+""")
+
+        with st.expander("🗂️ Le uscite sono raggruppate per società?"):
+            st.write("""
+Sì. L'app rileva i **pagamenti** e li classifica nella macrocategoria **"Pagamenti - [società]"**
+(es. Pagamenti - Telecom Italia, Pagamenti - Allianz, Pagamenti - INPS...). Ogni società ha la
+propria sottocategoria, quindi due pagamenti a società diverse restano descrizioni separate.
+Le categorie vengono create automaticamente e sono modificabili in **Gestione categorie**.
+""")
+
+        with st.expander("🔤 Cos'è la colonna ABI? Devo per forza inserirla?"):
+            st.write("""
+L'**ABI** è il codice della banca (es. 02008 per UniCredit) ed è presente solo su alcuni estratti
+conto. Nel caricamento è **opzionale**: se il tuo file non ce l'ha, lascia il campo vuoto.
+Se invece è presente, puoi selezionare la colonna ABI oppure impostare un **ABI predefinito**
+che verrà applicato a tutte le transazioni del caricamento.
+""")
+
+        with st.expander("📅 Le scadenze future vengono proposte automaticamente dagli estratti?"):
+            st.write("""
+Sì. Quando carichi un estratto conto, l'app analizza le **uscite che si ripetono con importi simili**
+(es. bolletta Telecom ogni mese) e propone di **calendarizzarle come scadenze mensili future**.
+Puoi rivedere le proposte e, con un click, crearle nello *Scadenzario & Promemoria*.
+""")
+
+        with st.expander("💱 Come gestisco la valuta e la colonna ABI nei file?"):
+            st.write("""
+Nel flusso di import trovi due campi opzionali: **Valuta** (default EUR) e **ABI** (vuoto se non presente).
+Entrambi vengono salvati per ogni transazione e restano visibili in *Resoconto & analisi* e
+*Archivio pagamenti* (colonne **Valuta** e **ABI**).
 """)
 
         with st.expander("💾 Con quale frequenza dovrei fare un backup?"):
