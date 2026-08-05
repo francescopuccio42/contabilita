@@ -102,3 +102,16 @@ CREATE TABLE IF NOT EXISTS prenotazioni (
 );
 
 ALTER TABLE prenotazioni DISABLE ROW LEVEL SECURITY;
+
+-- 8. Tabella error_logs (per raccogliere gli errori riscontrati su altri PC)
+CREATE TABLE IF NOT EXISTS error_logs (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    timestamp TIMESTAMPTZ DEFAULT NOW(),
+    pc_name TEXT,
+    error_message TEXT NOT NULL,
+    stack_trace TEXT,
+    app_version TEXT DEFAULT '1.0.0',
+    additional_info TEXT
+);
+
+ALTER TABLE error_logs DISABLE ROW LEVEL SECURITY;

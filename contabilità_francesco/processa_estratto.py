@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pandas as pd
 import pdfplumber
+import socket
 
 # Header di colonna delle tabelle movimenti nel PDF
 MOVEMENT_HEADER = {"Data", "Valuta", "Descrizione", "Uscite", "Entrate"}
@@ -270,5 +271,18 @@ def main():
     print(f"   Saldo:          {tot_ent - tot_usc:,.2f} EUR")
 
 
+def log_error(error_msg):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    pc_info = socket.gethostname()
+    with open('contabilità_francesco/logs/error_log.txt', 'a') as f:
+        f.write(f"Timestamp: {timestamp}\n")
+        f.write(f"Error Message: {error_msg}\n")
+        f.write(f"PC Information: {pc_info}\n")
+        f.write("\n")
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        log_error(str(e))

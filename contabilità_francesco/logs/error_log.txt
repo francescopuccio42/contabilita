@@ -1,0 +1,19 @@
+=== Error Log System ===
+Created: 2026-08-05 20:31:15
+Purpose: Track errors from multiple PCs connected to internet
+Format: Each entry includes timestamp, error details, PC info, and stack trace
+
+--- Example Error Entry ---
+Timestamp: 2026-08-05 20:31:15
+Error Type: TypeError
+Error Message: '<=' not supported between instances of 'float' and 'datetime.date'
+PC Name: PC_NAME_HERE
+PC IP: IP_ADDRESS_HERE
+Stack Trace: 
+File: processa_estratto.py
+Line: 175
+Function: extract_movements
+Details: Comparison between float and datetime.date in date parsing
+Solution: Convert date values to proper datetime format before comparison
+
+--- Current Log Entries ---

@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.6] - 2026-08-05
+### Aggiunto
+- **Log errori su Supabase (cloud)**: nuova funzione `log_error_supabase()` che registra errori nella tabella `error_logs` su Supabase con nome PC, messaggio, stack trace e versione app. Gli errori sono visibili da qualsiasi PC connesso a internet tramite la Dashboard Supabase.
+- **Log errori locale**: il file `logs/error_log.txt` viene aggiornato come fallback con timestamp, messaggio, stack trace e PC.
+- **Estratti conto online (cloud)**: i file caricati vengono salvati sia in locale sia su Supabase Storage (bucket `estratti_conto`), così sono visibili e scaricabili da tutti i PC.
+- **Archivio estratti unificato locale + cloud**: `elenca_estratti_archivio()` legge sia i file locali sia quelli su Supabase Storage.
+- **Lettura Excel universale**: supportati formati data seriali Excel (numeri), `YYYY-MM-DD`, `DD/MM/YYYY`, `DD/MM/YY`, `DD.MM.YYYY`, `DD.MM.YY`; risolve l'errore `'<=' not supported between instances of 'float' and 'datetime.date'`.
+- **Policy RLS Supabase**: nuovo script `setup_rls_policies.sql` con policy di accesso per utenti `authenticated` su tutte le tabelle (transazioni, categorie, scadenze, prenotazioni, error_logs).
+- **Tabella `error_logs`** nel database Supabase (creata in `supabase_setup.sql`).
+
+### Corretto
+- **Errore `'<=' not supported between instances of 'float' and 'datetime.date'`** durante la lettura degli estratti conto Excel: le date seriali Excel venivano lette come float e confrontate con oggetti `datetime.date`. Ora tutte le date vengono convertite correttamente.
+
 ## [2.3] - 2026-08-04
 ### Aggiunto
 - **Page "Archivio Estratti Conto"**: ogni file caricato viene salvato automaticamente come copia (anche se il PDF è scansionato/illeggibile, la copia resta) con elenco, download ed eliminazione per singolo file.

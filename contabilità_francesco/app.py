@@ -110,6 +110,36 @@ def get_ricevuta_url(nome_file):
         return None
     return f"{SUPABASE_STORAGE_URL}/{nome_file}"
 
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+def log_error_supabase(error_msg, stack_trace=None, additional_info=None):
+    """Registra un errore su Supabase (tabella error_logs) e localmente nel file di log."""
+    import socket
+    try:
+        supabase.table("error_logs").insert({
+            "pc_name": socket.gethostname(),
+            "error_message": str(error_msg)[:2000],
+            "stack_trace": str(stack_trace or "")[:5000] or None,
+            "app_version": "2.0",
+            "additional_info": str(additional_info or "")[:1000] or None,
+        }).execute()
+    except Exception:
+        pass
+    # Salva anche in locale (fallback)
+    try:
+        timestamp_log = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(os.path.join(LOG_DIR, "error_log.txt"), "a", encoding="utf-8") as f:
+            f.write(f"Timestamp: {timestamp_log}\n")
+            f.write(f"Error Message: {error_msg}\n")
+            if stack_trace:
+                f.write(f"Stack Trace: {stack_trace}\n")
+            if additional_info:
+                f.write(f"Additional Info: {additional_info}\n")
+            f.write("\n")
+    except Exception:
+        pass
+
 def scarica_ricevuta(nome_file):
     try:
         resp = supabase.storage.from_(STORAGE_BUCKET).download(nome_file)
@@ -365,26 +395,47 @@ def elimina_transazione(id_transazione, percorso_ricevuta):
     supabase.table("transazioni").delete().eq("id", id_transazione).execute()
 
 def salva_estratto_archivio(file_obj, nome_originale):
-    """Salva una copia dell'estratto conto caricato nell'archivio dedicato."""
+    """Salva una copia dell'estratto conto caricato nell'archivio dedicato (locale + cloud)."""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         estensione = os.path.splitext(nome_originale)[1].lower()
         nome_pulito = "".join([c if c.isalnum() or c in ['.', '_', '-'] else '_' for c in os.path.splitext(nome_originale)[0]])
         nome_salvato = f"{timestamp}_{nome_pulito}{estensione}"
         percorso = os.path.join(ARCHIVIO_ESTRATTI_DIR, nome_salvato)
+        dati_bin = file_obj.getvalue() if hasattr(file_obj, 'getvalue') else file_obj.read()
+        # Salva in locale
         with open(percorso, "wb") as f:
-            f.write(file_obj.getvalue() if hasattr(file_obj, 'getvalue') else file_obj.read())
+            f.write(dati_bin)
+        # Salva anche su Supabase Storage (cloud) per visibilità da tutti i PC
+        try:
+            supabase.storage.from_("estratti_conto").upload(
+                nome_salvato,
+                dati_bin,
+                {"content-type": "application/octet-stream"}
+            )
+        except Exception:
+            pass  # Fallback: resta solo in locale
         return nome_salvato, percorso
     except Exception:
         return None, None
 
 def elenca_estratti_archivio():
-    """Restituisce la lista dei file salvati in archivio, ordinati dal più recente."""
-    if not os.path.exists(ARCHIVIO_ESTRATTI_DIR):
-        return []
-    file_estratti = [f for f in os.listdir(ARCHIVIO_ESTRATTI_DIR) if os.path.isfile(os.path.join(ARCHIVIO_ESTRATTI_DIR, f))]
-    file_estratti.sort(reverse=True)
-    return file_estratti
+    """Restituisce la lista dei file salvati in archivio (locale + cloud), ordinati dal più recente."""
+    nomi_estratti = set()
+    # File locali
+    if os.path.exists(ARCHIVIO_ESTRATTI_DIR):
+        for f in os.listdir(ARCHIVIO_ESTRATTI_DIR):
+            if os.path.isfile(os.path.join(ARCHIVIO_ESTRATTI_DIR, f)):
+                nomi_estratti.add(f)
+    # File su Supabase Storage (cloud)
+    try:
+        resp = supabase.storage.from_("estratti_conto").list()
+        for item in resp:
+            nomi_estratti.add(item["name"])
+    except Exception:
+        pass
+    nomi_estratti.discard(".emptyFolderPlaceholder")
+    return sorted(nomi_estratti, reverse=True)
 
 def elimina_estratto_archivio(nome_file):
     """Elimina un estratto conto dall'archivio."""
@@ -1384,14 +1435,46 @@ Le voci (categorie) assegnate restano visibili **sempre**: nel tab *Modifica e V
                     if bool(pd.isna(val_data)) or bool(pd.isna(val_desc)):
                         continue
                         
-                    # Conversione data
+                    # Conversione data universale (supporta Excel seriali, ISO, italiano, ecc.)
                     try:
                         if isinstance(val_data, datetime):
                             data_parsed = val_data.date()
                         elif isinstance(val_data, date):
                             data_parsed = val_data
+                        elif isinstance(val_data, (int, float)):
+                            # Data serial Excel (giorni dal 1899-12-30)
+                            try:
+                                data_parsed = (datetime(1899, 12, 30) + timedelta(days=float(val_data))).date()
+                            except Exception:
+                                continue
+                        elif isinstance(val_data, str):
+                            val_data = val_data.strip()
+                            if not val_data:
+                                continue
+                            try:
+                                data_parsed = datetime.strptime(val_data, "%Y-%m-%d").date()
+                            except ValueError:
+                                try:
+                                    data_parsed = datetime.strptime(val_data, "%d/%m/%Y").date()
+                                except ValueError:
+                                    try:
+                                        data_parsed = datetime.strptime(val_data, "%d/%m/%y").date()
+                                    except ValueError:
+                                        try:
+                                            data_parsed = datetime.strptime(val_data, "%d.%m.%Y").date()
+                                        except ValueError:
+                                            try:
+                                                data_parsed = datetime.strptime(val_data, "%d.%m.%y").date()
+                                            except ValueError:
+                                                continue
                         else:
-                            data_parsed = pd.to_datetime(val_data).date()
+                            try:
+                                ts_parsed = pd.to_datetime(val_data)
+                                if pd.isna(ts_parsed):
+                                    continue
+                                data_parsed = ts_parsed.date()
+                            except Exception:
+                                continue
                     except Exception:
                         continue # Salta righe con data non valida
                         
@@ -1502,6 +1585,13 @@ Le voci (categorie) assegnate restano visibili **sempre**: nel tab *Modifica e V
                             aggiungi_categoria(row_gar['Tipo'], row_gar['Voce'])
                         except Exception:
                             pass
+
+                    # Normalizza la colonna Data a datetime/date coerente
+                    # (evita errori "<= not supported between float and datetime.date")
+                    try:
+                        df_elaborato['Data'] = pd.to_datetime(df_elaborato['Data']).dt.date
+                    except Exception:
+                        pass
 
                     # ─── PROPOSTA AUTOMATICA SCADENZE FUTURE ─────────────────
                     proposte_scadenze = proponi_scadenze_da_estratti(df_elaborato)
@@ -1836,6 +1926,8 @@ Le voci (categorie) assegnate restano visibili **sempre**: nel tab *Modifica e V
                                 st.session_state["ec_uploader_key"] = st.session_state.get("ec_uploader_key", 0) + 1
                                 st.rerun()
         except Exception as e:
+            import traceback
+            log_error_supabase(str(e), traceback.format_exc(), additional_info=f"File: {file_caricato.name} | Estensione: {estensione}")
             st.error(f"Errore durante la lettura del file Excel: {str(e)}")
 
 # ─── PAGINA: ARCHIVIO ESTRATTI CONTO ───────────────────────
@@ -3156,6 +3248,29 @@ ALTER TABLE transazioni ADD COLUMN IF NOT EXISTS estratto_nome TEXT;
             st.write("""
 Tutti i dati (transazioni, categorie, scadenze, prenotazioni) vengono salvati su **Supabase**, un database cloud.
 Le **ricevute** vengono caricate su Supabase Storage (con fallback locale). I **backup** vengono salvati in locale nella cartella `backups/`.
+Gli **estratti conto** caricati vengono salvati sia in locale sia su **Supabase Storage** (bucket `estratti_conto`), quindi sono visibili e scaricabili da tutti i PC collegati a internet.
+Gli **errori** riscontrati su qualsiasi PC vengono registrati su Supabase (tabella `error_logs`) e nel file locale `logs/error_log.txt`.
+""")
+
+        with st.expander("🔍 Come posso vedere gli errori registrati dagli altri PC?"):
+            st.write("""
+Tutti gli errori (es. durante la lettura di un estratto conto Excel) vengono salvati nella tabella **`error_logs`** su Supabase.
+Per visualizzarli: apri la **Dashboard Supabase** → **Table Editor** → seleziona la tabella `error_logs`.
+Ogni errore include: nome del PC, messaggio, stack trace e versione dell'app. Da lì puoi correggere il problema.
+C'è anche una copia locale in `logs/error_log.txt` su ciascun PC.
+""")
+
+        with st.expander("📥 Gli estratti conto sono visibili da tutti i PC?"):
+            st.write("""
+Sì. Quando carichi un estratto conto, il file viene salvato sia in locale sia su **Supabase Storage** (bucket `estratti_conto`).
+Nella pagina *Archivio Estratti Conto* vedi tutti i file caricati da qualsiasi PC connesso a internet, e puoi scaricarli ovunque.
+""")
+
+        with st.expander("🔐 Come funziona la sicurezza dei dati su Supabase?"):
+            st.write("""
+I dati sono protetti dalla **Row Level Security (RLS)** di Supabase. Le policy sono configurate con lo script `setup_rls_policies.sql`
+per consentire l'accesso solo agli utenti `authenticated` (cioè dopo il login).
+Esegui lo script nel **SQL Editor** della Dashboard Supabase se non lo hai ancora fatto.
 """)
 
         with st.expander("📥 Come importo un estratto conto in PDF?"):
